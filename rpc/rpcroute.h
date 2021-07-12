@@ -38,6 +38,14 @@
 namespace rpcf
 {
 
+gint32 AppendConnParams(
+    IConfigDb* pConnParams,
+    BufPtr& pBuf );
+
+gint32 gen_sess_hash(
+    BufPtr& pBuf,
+    std::string& strSess );
+
 struct IRpcReqProxyAsync
 {
 
@@ -201,6 +209,14 @@ class CRegisteredObject
         return strName;
     }
 
+    std::string GetSrcDBusName()
+    {
+        std::string strName;
+        CCfgOpener oCfg( this );
+        strName = oCfg[ propSrcDBusName ];
+        return strName;
+    }
+
     // test if the match belongs to this
     // registered interface
     gint32 IsMyMatch( IMessageMatch* pMatch );
@@ -288,6 +304,27 @@ class CRpcInterfaceServer :
         DBusMessage* pReqMsg,
         IConfigDb* pDataDesc );
 
+    gint32 OnFwrdReqQueueFull(
+        IEventSink* pCallback,
+        IEventSink* pIoReq,
+        IConfigDb* pReqCtx );
+
+    gint32 CloneInvTask(
+        IEventSink* pCallback,
+        TaskletPtr& pTask ) const;
+
+    gint32 RetrieveTaskId(
+        IEventSink* pCallback,
+        guint64& qwTaskId ) const;
+
+    gint32 RetrieveDest(
+        IEventSink* pCallback,
+        stdstr& strDest ) const;
+
+    virtual gint32 GetGrpRfc(
+        DMsgPtr& pMsg,
+        TaskGrpPtr& pGrp ) = 0;
+
     public:
 
     typedef CAggInterfaceServer super;
@@ -322,7 +359,32 @@ class CRpcInterfaceServer :
     virtual gint32 OnKeepAlive(
         IEventSink* pInvokeTask,
         EnumKAPhase bOrigin );
+
+    gint32 CancelInvTasks( ObjVecPtr& pTasks );
+
+    virtual gint32 RequeueInvTask(
+        IEventSink* pCallback ) = 0;
+
+    bool IsRfcEnabled() const;
+
+    gint32 InstallQFCallback(
+        TaskletPtr& pInvTask ) const;
+
+    virtual gint32 AddAndRun(
+        TaskletPtr& pTask,
+        bool bImmediate = false ) override;
 };
+
+using FWRDREQ_ELEM = 
+    std::pair< TaskletPtr, guint64 >;
+
+using FWRDREQS = 
+    std::vector< FWRDREQ_ELEM >;
+
+using FWRDREQS_ITER =
+    FWRDREQS::iterator;
+
+using IF_TASK_MAP = CStlMap< InterfPtr, QwVecPtr >;
 
 class CRpcReqForwarder :
      public CRpcInterfaceServer
@@ -408,7 +470,8 @@ class CRpcReqForwarder :
         guint32& dwSize,                // [in,out]
         IEventSink* pCallback );
 
-    bool SupportIid( EnumClsid iIfId ) const
+    bool SupportIid(
+        EnumClsid iIfId ) const override
     {
         if( iIfId == iid( IStream ) )
             return true;
@@ -422,12 +485,101 @@ class CRpcReqForwarder :
         IEventSink* pIoReq,
         IConfigDb* pReqCtx );
 
+    bool m_bRfc = false;
+    using GRPRFC_KEY=std::pair< gint32, stdstr >;
+    std::map< GRPRFC_KEY, TaskGrpPtr > m_mapGrpRfcs;
+    std::map< stdstr, stdstr > m_mapUq2SdName;
+    bool m_bSepConns = false;
+
+    inline gint32 GetSrcDBusName(
+        const stdstr& strUqName,
+        stdstr& strName ) const
+    {
+        CStdRMutex oLock( GetLock() );
+        std::map< stdstr, stdstr >::const_iterator
+            itr = m_mapUq2SdName.find( strUqName );
+
+        if( itr == m_mapUq2SdName.cend() )
+            return -ENOENT;
+
+        strName = itr->second;
+        return 0;
+    }
+
+    gint32 GetGrpRfcs(
+        guint32 dwPortId,
+        std::vector< TaskGrpPtr >& vecGrps ) const;
+
+    gint32 GetGrpRfcs(
+        const stdstr& strUniqName,
+        std::vector< TaskGrpPtr >& vecGrps ) const;
+
+    gint32 GetGrpRfc( GRPRFC_KEY& oKey,
+        TaskGrpPtr& pGrp ) const;
+
+    gint32 GetGrpRfc(
+        DMsgPtr& pMsg,        
+        TaskGrpPtr& pGrp ) override;
+
+    gint32 RemoveGrpRfcs(
+        const stdstr& strUniqName );
+
+    gint32 RemoveGrpRfcs(
+        guint32 dwPortId );
+
+    gint32 RemoveGrpRfc(
+        guint32 dwPortId,
+        const stdstr& strUniqName );
+
+    gint32 FindFwrdReqsAll(
+        guint32 dwPortId,
+        const stdstr& strUniqName,
+        FWRDREQS& vecTasks,
+        bool bTaskId );
+
+    gint32 FindFwrdReqsAllRfc(
+        guint32 dwPortId,
+        const stdstr& strUniqName,
+        FWRDREQS& vecTasks,
+        bool bTaskId );
+
+    gint32 FindFwrdReqsAllRfc(
+        const stdstr& strUniqName,
+        FWRDREQS& vecTasks,
+        bool bTaskId );
+
+    gint32 FindFwrdReqsAll(
+        const stdstr& strUniqName,
+        FWRDREQS& vecTasks,
+        bool bTaskId = true );
+
+    gint32 GetInvTaskProxyMH(
+        TaskletPtr& pTask,
+        InterfPtr& pProxy );
+
+    gint32 GetInvTaskPrxyPortId(
+        TaskletPtr& pTask,
+        guint32& dwPortId );
+
+    gint32 ClearFwrdReqsByDestAddr(
+        guint32 dwPortId,
+        const stdstr& strPath,
+        DMsgPtr& pMsg );
+
+    gint32 FindUniqNamesByPortId(
+        guint32 dwPortId,
+        std::set< stdstr >& setNames );
+
+    gint32 FindFwrdReqsByPrxyPortId(
+        guint32 dwPrxyPortId,
+        std::vector< stdstr >& strNames,
+        FWRDREQS& vecTasks );
+
     public:
 
     typedef CRpcInterfaceServer super;
 
-    CRpcReqForwarder(
-        const IConfigDb* pCfg );
+    CRpcReqForwarder( const IConfigDb* pCfg );
 
     gint32 InitUserFuncs();
 
@@ -449,11 +601,18 @@ class CRpcReqForwarder :
         const std::string& strUniqName,
         std::set< guint32 >& setPortIds );
 
+    gint32 ClearRefCountBySrcDBusName(
+        const std::string& strName,
+        std::set< guint32 >& setPortIds );
+
     gint32 GetRefCountByPortId(
         guint32 dwPortId );
 
     gint32 GetRefCountByUniqName(
         const std::string& strUniqName );
+
+    gint32 GetRefCountBySrcDBusName(
+        const std::string& strName );
 
     const EnumClsid GetIid() const
     { return iid( CRpcReqForwarder ); }
@@ -536,6 +695,20 @@ class CRpcReqForwarder :
         IEventSink* pCallback,
         IConfigDb* pReqCtx );
 
+    gint32 FindFwrdReqsByUniqName(
+        const stdstr& strName,
+        FWRDREQS& vecTasks );
+ 
+    gint32 RequeueInvTask(
+        IEventSink* pCallback ) override;
+
+    gint32 CreateGrpRfc(
+        guint32 dwPortId,
+        const stdstr& strUniqName,
+        const stdstr& strSdName );
+
+    inline bool IsSepConns() const
+    { return m_bSepConns; }
 }; // CRpcReqForwarder
 
 class CRpcRfpForwardEventTask
@@ -543,7 +716,8 @@ class CRpcRfpForwardEventTask
 {
     public:
     typedef CIfParallelTask super;
-    CRpcRfpForwardEventTask ( const IConfigDb* pCfg = nullptr )
+    CRpcRfpForwardEventTask(
+        const IConfigDb* pCfg = nullptr )
         : CIfParallelTask( pCfg )
     {
         SetClassId( clsid( CRpcRfpForwardEventTask ) );
@@ -686,6 +860,11 @@ class CRpcReqForwarderProxy :
         IConfigDb* pEvtCtx,
         HANDLE hPort );
 
+    gint32 ForceCancelRequests(
+        ObjPtr& pvecTasks,
+        guint64& qwThisTaskId,
+        IEventSink* pCallback );
+
     protected:
 
     gint32 OnModEvent(
@@ -762,17 +941,9 @@ struct CRpcTcpBridgeShared
     gint32 StartHandshake(
         IEventSink* pCallback );
 
-    inline bool IsRfcEnabled() const
-    { return m_bRfc; }
-
-    inline void SetRfcEnabled( bool bRfc )
-    { m_bRfc = bRfc; }
-
     protected:
     CRpcServices* m_pParentIf;
     TaskGrpPtr    m_pGrpRfc;
-    TaskletPtr    m_pPHTask;
-    bool          m_bRfc = false;
 
     gint32 ReadWriteStream(
         gint32 iStreamId,
@@ -795,7 +966,7 @@ struct CRpcTcpBridgeShared
         PortPtr& pPort,
         bool& bPdo );
 
-    gint32 InitRfc();
+    gint32 InitRfc( CCfgOpener& oParams );
 };
 
 class CRpcTcpBridge :
@@ -857,6 +1028,32 @@ class CRpcTcpBridge :
         IEventSink*  pIoReq,
         IConfigDb* pReqCtx );
 
+    gint32 FindFwrdReqsByTaskId(
+        std::vector< guint64 >& vecTaskIds,
+        FWRDREQS& vecTasks );
+
+    gint32 FindFwrdReqsByDestAddr(
+        const stdstr& strPath,
+        const stdstr& strDest,
+        FWRDREQS& vecTasks );
+
+    gint32 GetFwrdReqs(
+        FWRDREQS& vecReqs,
+        ObjMapPtr& pmapTaskIdsLoc,
+        ObjMapPtr& pmapTaskIdsMH );
+
+    gint32 ClearFwrdReqsByDestAddr(
+        const stdstr strPath,
+        DMsgPtr& pMsg );
+
+    gint32 IsMHTask(
+        TaskletPtr& pTask );
+
+    gint32 GetInvTaskProxyMH(
+        TaskletPtr& pTask,
+        InterfPtr& pIf,
+        bool bQueued );
+
     protected:
     virtual gint32 SetupReqIrpFwrdEvt(
         IRP* pIrp,
@@ -879,10 +1076,22 @@ class CRpcTcpBridge :
         IEventSink* pCallback,
         bool bSeqTask );
 
+    virtual gint32 GetGrpRfc(
+        DMsgPtr& pMsg,
+        TaskGrpPtr& pGrp )
+    {
+        pGrp = m_pGrpRfc;
+        if( pGrp.IsEmpty() )
+            return -EFAULT;
+        return 0;
+    }
+
     protected:
     TaskletPtr m_pHsTicker;
     bool m_bHandshaked = false;
     bool m_bHsFailed = false;
+    stdstr m_strSess;
+
     CTimestampSvr m_oTs;
 
     // for load balance
@@ -919,6 +1128,9 @@ class CRpcTcpBridge :
         const std::string& strNext,
         const std::string& strLBNode,
         const std::vector< std::string >& vecNodes );
+
+    gint32 GenSessHash(
+        std::string& strSess ) const;
 
     public:
 
@@ -988,11 +1200,7 @@ class CRpcTcpBridge :
     }
 
     gint32 StartEx2(
-        IEventSink* pCallback ) override
-    {
-        return CRpcTcpBridgeShared::StartEx2(
-            pCallback );
-    }
+        IEventSink* pCallback ) override;
 
     gint32 CheckHsTimeout(
         IEventSink* pTask,
@@ -1054,7 +1262,8 @@ class CRpcTcpBridge :
 
     gint32 ClearRemoteEvents(
         IEventSink* pCallback,
-        ObjPtr& pVecMatches );
+        ObjPtr& pVecMatches , // [ in ]
+        ObjPtr& pVecTaskIds );
 
     gint32 CheckRouterPath(
         IEventSink* pCallback,
@@ -1082,16 +1291,39 @@ class CRpcTcpBridge :
 
     gint32 PostDisconnEvent();
 
-    virtual gint32 AddAndRun(
-        TaskletPtr& pParallelTask,
-        bool bImmediate = false ) override;
-
-    virtual gint32 OnPreStop(
+    virtual gint32 OnPostStop(
         IEventSink* pCallback ) override;
 
     gint32 RefreshReqLimit(
         guint32 dwMaxReqs,
         guint32 dwMaxPendigns );
+
+    const stdstr& GetSessHash() const
+    { return m_strSess; }
+ 
+    gint32 FindFwrdReqsAll(
+        FWRDREQS& vecTasks,
+        bool bTaskId = true );
+
+    gint32 GetFwrdReqsToCancel(
+        ObjMapPtr& pmapTaskIdsLoc,
+        ObjMapPtr& pmapTaskIdsMH );
+
+    gint32 RequeueInvTask(
+        IEventSink* pCallback ) override ;
+
+    gint32 GetAllFwrdReqs(
+        FWRDREQS& vecReqs,
+        ObjMapPtr& pmapTaskIdsLoc,
+        ObjMapPtr& pmapTaskIdsMH );
+
+    gint32 FindFwrdReqsByPrxyPortId(
+        guint32 dwPrxyPortId,
+        FWRDREQS& vecTasks );
+
+    gint32 FindFwrdReqsByPath(
+        const stdstr& strPath,
+        FWRDREQS& vecTasks );
 
 }; // CRpcTcpBridge
 
@@ -1148,6 +1380,11 @@ class CRpcTcpBridgeProxy :
 
     CTimestampProxy m_oTs;
 
+    inline void SetRfcEnabled( bool bRfc )
+    { m_bRfc = bRfc; }
+
+    bool          m_bRfc = false;
+
     public:
 
     typedef CRpcInterfaceProxy super;
@@ -1178,6 +1415,7 @@ class CRpcTcpBridgeProxy :
     // down
     gint32 ClearRemoteEvents(
         ObjPtr& pVecMatches , // [ in ]
+        ObjPtr& pVecTaskIds,
         IEventSink* pCallback );
 
     gint32 CheckRouterPath(
@@ -1277,7 +1515,7 @@ class CRpcTcpBridgeProxy :
             pCfg, pPort, bPdo );
     }
 
-    virtual gint32 OnPreStop(
+    virtual gint32 OnPostStop(
         IEventSink* pCallback ) override;
 
     gint32 RefreshReqLimit(
@@ -1287,6 +1525,9 @@ class CRpcTcpBridgeProxy :
 
     gint32 RequeueTask(
         TaskletPtr& pFcTask );
+
+    inline bool IsRfcEnabled() const
+    { return m_bRfc; }
 
 }; // CRpcTcpBridgeProxy
 
@@ -1325,9 +1566,13 @@ class CRouterStopBridgeProxyTask2
 class CRouterStopBridgeTask
     : public CIfInterceptTaskProxy
 {
-    gint32 DisableRemoteEventsMH(
+    gint32 DoSyncedTask(
         IEventSink* pCallback,
-        std::vector< MatchPtr >& vecMatches );
+        ObjVecPtr& pvecMatchsLoc );
+
+    gint32 SyncedTasks(
+        IEventSink* pCallback,
+        ObjVecPtr& pvecMatchsLoc );
 
     public:
     typedef CIfInterceptTaskProxy super;
@@ -1338,6 +1583,7 @@ class CRouterStopBridgeTask
     }
     virtual gint32 RunTask();
     virtual gint32 OnTaskComplete( gint32 iRetVal );
+    CIoManager* GetIoMgr();
 
     gint32 OnCancel( guint32 dwContext )
     {  return OnTaskComplete( -ECANCELED ); }
@@ -1459,6 +1705,8 @@ class CRpcRouter :
     virtual gint32 IsEqualConn(
         const IConfigDb* pConn1,
         const IConfigDb* pConn2 );
+
+    bool IsRfcEnabled() const;
 };
 
 class CReqFwdrCloseRmtPortTask
@@ -1748,7 +1996,11 @@ class CRouterEventRelayRespTask :
 class CReqFwdrForwardRequestTask :
     public CIfInterceptTaskProxy
 {
-    gint32 OnTaskCompleteRfc( gint32 iRetVal );
+    virtual gint32 OnTaskCompleteRfc(
+        gint32 iRetVal, TaskletPtr& pTask );
+
+    gint32 CloneIoTask( TaskletPtr& pIoTask );
+
     public:
     typedef CIfInterceptTaskProxy super;
 
@@ -1775,6 +2027,9 @@ class CBridgeForwardRequestTask :
         IConfigDb* pReqCtx,
         DBusMessage* pReqMsg,           // [ in ]
         DMsgPtr& pRespMsg );            // [ out ]
+
+    gint32 OnTaskCompleteRfc(
+        gint32 iRetVal, TaskletPtr& pTask ) override;
 };
 
 class CReqFwdrFetchDataTask :
@@ -1864,7 +2119,7 @@ class CRpcRouterReqFwdr : public CRpcRouter
 
     gint32 Start();
 
-    bool HasReqForwarder() const
+    bool HasReqForwarder() const override
     { return true; }
 
     // check if the match is valid before it is
@@ -1893,11 +2148,18 @@ class CRpcRouterReqFwdr : public CRpcRouter
         const std::string& strUniqName,
         std::set< guint32 >& setPortIds );
 
+    gint32 ClearRefCountBySrcDBusName(
+        const std::string& strName,
+        std::set< guint32 >& setPortIds );
+
     gint32 GetRefCountByPortId(
         guint32 dwPortId );
 
     gint32 GetRefCountByUniqName(
         const std::string& strUniqName );
+
+    gint32 GetRefCountBySrcDBusName(
+        const std::string& strName );
 
     gint32 AddLocalMatch(
         IMessageMatch* pMatch );
@@ -1948,6 +2210,11 @@ class CRpcRouterReqFwdr : public CRpcRouter
         EnumEventId iEvent,
         IConfigDb* pEvtCtx,
         HANDLE hPort );
+
+    gint32 FindUniqNamesByPortId(
+        guint32 dwPortId,
+        std::set< stdstr >& setNames );
+
 };
 
 class CRegObjectBridge
@@ -2116,7 +2383,6 @@ class CRpcRouterBridge : public CRpcRouter
     gint32 BuildNodeMap();
 
     #define RFC_HISTORY_LEN     1440
-    bool      m_bRfc = false;
     struct REQ_LIMIT
     {
         guint32 dwMaxReqs;
@@ -2218,7 +2484,7 @@ class CRpcRouterBridge : public CRpcRouter
     using IFMAP_CITR =
         std::map< std::string, InterfPtr >::const_iterator;
 
-    bool HasBridge() const
+    bool HasBridge() const override
     { return true; }
 
     inline gint32 GetReqFwdrProxy(
@@ -2244,6 +2510,11 @@ class CRpcRouterBridge : public CRpcRouter
 
     gint32 RemoveRemoteMatch(
         IMessageMatch* pMatch );
+
+    gint32 FindRemoteMatchByPortId(
+        guint32 dwPortId,
+        std::vector< MatchPtr >& vecMatches,
+        bool bRemove = false );
 
     gint32 RemoveRemoteMatchByPortId(
         guint32 dwPortId,
@@ -2488,6 +2759,7 @@ class CRpcRouterBridge : public CRpcRouter
     gint32 ClearRemoteEventsMH(
         IEventSink* pCallback,
         ObjPtr& pVecMatches,
+        ObjPtr& pMapTaskIds,
         bool bForceClear );
 
     gint32 BuildRmtSvrEventMH(
@@ -2504,9 +2776,6 @@ class CRpcRouterBridge : public CRpcRouter
         CStdRMutex oRouterLock( GetLock() );
         return m_mapPortId2Bdge.size();
     }
-
-    inline bool IsRfcEnabled() const
-    { return m_bRfc; }
 
     gint32 GetCurConnLimit(
         guint32& dwMaxReqs,
@@ -2578,11 +2847,6 @@ DECLARE_AGGREGATED_SERVER(
      CRpcRouterBridge,
      CStatCountersServer ); 
 
-DECLARE_AGGREGATED_SERVER(
-    CRpcReqForwarderImpl,
-    CRpcReqForwarder,
-    CStatCountersServer ); 
-
 DECLARE_AGGREGATED_PROXY(
     CRpcReqForwarderProxyImpl,
     CRpcReqForwarderProxy,
@@ -2595,6 +2859,11 @@ DECLARE_AGGREGATED_PROXY(
 
 namespace rpcf
 {
+
+DECLARE_AGGREGATED_SERVER(
+    CRpcReqForwarderImpl,
+    CRpcReqForwarder,
+    CStatCountersServer ); 
 
 DECLARE_AGGREGATED_SERVER(
     CRpcTcpBridgeImpl,
@@ -2681,4 +2950,47 @@ inline gint32 NewIfDeferredCall2( EnumClsid iTaskClsid,
     _ret; \
 })
 
+class CIfParallelTaskGrpRfc :
+    public CIfParallelTaskGrp
+{
+    guint32 m_dwMaxRunning = RFC_MAX_REQS;
+    guint32 m_dwMaxPending = RFC_MAX_PENDINGS;
+    guint32 m_dwTaskAdded = 0;
+    guint32 m_dwTaskRejected = 0;
+
+    public:
+    typedef CIfParallelTaskGrp super;
+    CIfParallelTaskGrpRfc( const IConfigDb* pCfg );
+
+    gint32 SetLimit(
+        guint32 dwMaxRunning,
+        guint32 dwMaxPending );
+
+    inline guint32 GetMaxRunning() const
+    { return m_dwMaxRunning; }
+
+    inline guint32 GetMaxPending() const
+    { return m_dwMaxPending; }
+
+    inline guint32 GetRunningCount() const
+    { return m_setTasks.size() - 1; }
+
+    virtual gint32 RunTaskInternal(
+        guint32 dwContext ) override;
+
+    virtual gint32 OnChildComplete(
+        gint32 ret, CTasklet* pChild ) override;
+
+    gint32 AddAndRun( TaskletPtr& pTask );
+
+    virtual gint32 AppendTask(
+        TaskletPtr& pTask ) override ;
+
+    virtual gint32 InsertTask(
+        TaskletPtr& pTask ) override ;
+};
+
+#define IS_SVRMODOFFLINE_EVENT( __pEvtMsg ) \
+( __pEvtMsg.GetMember() == "NameOwnerChanged" && \
+    __pEvtMsg.GetInterface() == DBUS_SYS_INTERFACE )
 }

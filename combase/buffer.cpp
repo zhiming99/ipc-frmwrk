@@ -926,6 +926,11 @@ bool CBuffer::operator==( const CBuffer& rhs ) const
     {
     case DataTypeMem:
         {
+            if( ptr() == rhs.ptr() )
+            {
+                ret = true;
+                break;
+            }
             if( bcmp( ptr(), rhs.ptr(), size() ) == 0 )
                 ret = true;
             break;
@@ -939,11 +944,14 @@ bool CBuffer::operator==( const CBuffer& rhs ) const
         }
     case DataTypeMsgPtr:
         {
+            if( ptr() == rhs.ptr() )
+            {
+                ret = true;
+                break;
+            }
             DMsgPtr& pDMsg1 = *reinterpret_cast< DMsgPtr* >( ptr() );
             DMsgPtr& pDMsg2 = *reinterpret_cast< DMsgPtr* >( rhs.ptr() );
             ret = ( pDMsg1 == pDMsg2 );
-            if( ptr() == rhs.ptr() )
-                ret = true;
             break;
         }
     default:

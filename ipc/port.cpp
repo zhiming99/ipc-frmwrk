@@ -1162,8 +1162,8 @@ gint32 CPort::SubmitStopIrpEx( IRP* pIrp )
         pIrp->GetStackSize() == 0 )
         return -EINVAL;
 
-    DebugPrint( 0, "Stopping %s...",
-        CoGetClassName( GetClsid() ) );
+    DebugPrint( 0, "Stopping %s @0x%x...",
+        CoGetClassName( GetClsid() ), this );
     // PNP_STATE_STOP_PRELOCK is a state before
     // the port switch to PORT_STATE_STOPPING,
     // that is the I/O is still available at this

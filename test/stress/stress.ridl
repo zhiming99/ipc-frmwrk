@@ -1,0 +1,44 @@
+// must have statement
+appname "StressTest";
+
+const auth_json=```
+{
+    "AuthMech" : "krb5",
+    "UserName" : "zhiming@rpcf.org",
+    "ServiceName" : "rasp1@rpcf.org",
+    "Realm" : "rpcf.org",
+    "SignMessage" : "true"
+}
+```;
+
+// echo different type of information
+interface IEchoThings
+{
+    // both proxy and server are asynchronous,
+    // that is return STATUS_PENDING if the
+    // request is not complete yet
+    [ async_p ]Echo( string strText )
+        returns ( string strResp ) ;
+
+    // proxy side is asynchronous, while server
+    // side is synchronous
+    EchoUnknown( bytearray pBuf )
+        returns ( bytearray pResp );
+
+    [ noreply ]Ping( string strCount )
+        returns ();
+    // a event from server to the proxy, response
+    // list is alway empty and the server gets no
+    // feedback related to the proxy.
+    [ event ]OnHelloWorld( string strMsg ) returns ();
+};
+
+service StressSvc [
+    timeout=120, rtpath="/",
+    ipaddr="192.168.3.13",
+    compress, auth=auth_json,
+    stream ]
+{
+    interface IEchoThings;
+};
+

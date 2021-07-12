@@ -275,6 +275,7 @@ CK5AuthServer::CK5AuthServer(
 {
     gint32 ret = 0;
     do{
+        SetClassId( clsid( CK5AuthServer ) );
         CCfgOpenerObj oIfCfg( this );
         ret = oIfCfg.GetPointer(
             propRouterPtr, m_pRouter );
@@ -782,7 +783,7 @@ gint32 CK5AuthServer::GenSessHash(
     if( dwPortId == 0 )
         return -EINVAL;
 
-    gint32          ret = 0;
+    gint32 ret = 0;
     do{
         BufPtr pBuf( true );
         ret = gss_sess_hash_partial(
@@ -821,7 +822,16 @@ gint32 CK5AuthServer::GenSessHash(
         pBuf->Append( ( char* )&qwSalt,
             sizeof( qwSalt ) );
 
-        ret = gen_sess_hash( pBuf, strSess );
+        stdstr strRet;
+        ret = gen_sess_hash( pBuf, strRet );
+        if( ERROR( ret ) )
+            break;
+
+        strSess = "AU";
+        strSess += strRet;
+
+        DebugPrint( 0, "Sess hash is %s",
+            strSess.c_str() );
 
     }while( 0 );
 

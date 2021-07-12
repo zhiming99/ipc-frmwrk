@@ -74,6 +74,8 @@ class IMessageMatch : public CObjBase
         const std::string& strObjPath ) const = 0;
 
     virtual std::string GetDest() const = 0;
+
+    virtual const CfgPtr& GetCfg() const = 0;
 };
 
 typedef CAutoPtr< Clsid_Invalid, IMessageMatch > MatchPtr;
@@ -449,13 +451,15 @@ class CMessageMatch : public IMessageMatch
         m_iMatchType = iType;
     }
 
-    gint32 GetIfName( std::string& strIfName )
+    gint32 GetIfName(
+        std::string& strIfName ) const
     {
         strIfName = m_strIfName;
         return 0;
     }
 
-    gint32 GetObjPath( std::string& strObjPath )
+    gint32 GetObjPath(
+        std::string& strObjPath ) const
     {
         strObjPath = m_strObjPath;
         return 0;
@@ -502,31 +506,25 @@ class CMessageMatch : public IMessageMatch
         if( !strRule.empty() )
             strMatch = strRule;
 
-        CCfgOpenerObj oCfg( this );
-        if( oCfg.exist( propIfName ) )
+        GetIfName( strRule );
+        if( !strRule.empty() )
         {
-            ret = oCfg.GetStrProp( propIfName, strRule );
-            if( SUCCEEDED( ret ) && !strRule.empty() )
-            {
-                strMatch += std::string( ",interface='" )
-                    + strRule + std::string( "'" );
-            }
+            strMatch += std::string( ",interface='" )
+                + strRule + std::string( "'" );
         }
 
-        if( oCfg.exist( propObjPath ) )
+        GetObjPath( strRule );
+        if( !strRule.empty() )
         {
-            ret = oCfg.GetStrProp( propObjPath, strRule );
-
-            if( SUCCEEDED( ret ) && !strRule.empty() )
-            {
-                strMatch += std::string( ",path='" )
-                    + strRule + std::string( "'" );
-            }
+            strMatch += std::string( ",path='" )
+                + strRule + std::string( "'" );
         }
 
+        CCfgOpener oCfg( ( IConfigDb* )GetCfg() );
         if( oCfg.exist( propMethodName ) )
         {
-            ret = oCfg.GetStrProp( propMethodName, strRule );
+            ret = oCfg.GetStrProp(
+                propMethodName, strRule );
 
             if( SUCCEEDED( ret ) && !strRule.empty() )
             {
@@ -1179,19 +1177,22 @@ class CRouterRemoteMatch : public CMessageMatch
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp(
-                propDestDBusName, pMatch );
+            CCfgOpener oCfg2( ( IConfigDb* )GetCfg() );
+            IConfigDb* prhs = pMatch->GetCfg();
+
+            ret = oCfg2.CopyProp(
+                propDestDBusName, prhs );
 
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp( propRouterPath, pMatch );
+            ret = oCfg2.CopyProp( propRouterPath, prhs );
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp( propPortId, pMatch );
-            if( oCfg.IsEqual( propRouterPath,
-                std::string( "/" ) ) )
+            ret = oCfg2.CopyProp( propPortId, prhs );
+            if( oCfg2.IsEqual(
+                propRouterPath, std::string( "/" ) ) )
                 break;
 
             // optional
@@ -1247,7 +1248,8 @@ class CRouterRemoteMatch : public CMessageMatch
             return ret;
         do{
             DMsgPtr pMsg( pReqMsg );
-            CCfgOpenerObj oCfg( this );
+            CCfgOpener oCfg(
+                ( IConfigDb* )GetCfg() );
 
             std::string strDest =
                 pMsg.GetDestination();
@@ -1407,29 +1409,32 @@ class CRouterLocalMatch : public CRouterRemoteMatch
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp(
-                propDestDBusName, pMatch );
+            CCfgOpener oCfg2( ( IConfigDb* )GetCfg() );
+            IConfigDb* prhs = pMatch->GetCfg();
+
+            ret = oCfg2.CopyProp(
+                propDestDBusName, prhs );
 
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp(
-                propRouterPath, pMatch );
+            ret = oCfg2.CopyProp(
+                propRouterPath, prhs );
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp(
-                propSrcDBusName, pMatch );
+            ret = oCfg2.CopyProp(
+                propSrcDBusName, prhs );
             if( ERROR( ret ) )
                 break;
 
-            ret = oCfg.CopyProp(
-                propSrcUniqName, pMatch );
+            ret = oCfg2.CopyProp(
+                propSrcUniqName, prhs );
             if( ERROR( ret ) )
                 break;
 
-            oCfg.CopyProp(
-                propPrxyPortId, pMatch );
+            oCfg2.CopyProp(
+                propPrxyPortId, prhs );
 
         }while( 0 );
 
@@ -1477,15 +1482,16 @@ class CRouterLocalMatch : public CRouterRemoteMatch
             return ret;
 
         CCfgOpener oReqCtx( pReqCtx );
-        CCfgOpenerObj oCfg( this );
+        CCfgOpener oCfg(
+            ( IConfigDb* )GetCfg() );
 
         ret = oCfg.IsEqualProp(
             propRouterPath, pReqCtx );
         if( ERROR( ret ) )
             return ret;
         
-        std::string strVal; 
         DMsgPtr pMsg( pReqMsg );
+        stdstr strVal = pMsg.GetSender();
 
         ret = oCfg.IsEqual( propSrcDBusName, 
             pMsg.GetSender() );
@@ -1510,7 +1516,8 @@ class CRouterLocalMatch : public CRouterRemoteMatch
         gint32 ret = 0;
 
         do{
-            CCfgOpenerObj oCfg( this );
+            CCfgOpener oCfg(
+                ( IConfigDb* )GetCfg() );
 
             ret = oCfg.IsEqualProp(
                 propRouterPath, pEvtCtx );

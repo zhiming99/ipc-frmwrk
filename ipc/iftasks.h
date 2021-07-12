@@ -94,12 +94,13 @@ class CIfRetryTask
     TaskletPtr          m_pFwdrTask;
 
     gint32 SetFwrdTask( IEventSink* pCallback );
-    TaskletPtr GetFwrdTask() const;
-    gint32 ClearFwrdTask();
-    TaskletPtr GetEndFwrdTask();
+    TaskletPtr GetFwrdTask( bool bClear = false );
     gint32 CancelTaskChain(
         guint32 dwContest,
         gint32 iError = -ECANCELED );
+
+    gint32 DoCancelTaskChain(
+        guint32 dwContext, gint32 iError );
 
     public:
     typedef CThreadSafeTask super;
@@ -161,6 +162,9 @@ class CIfRetryTask
     gint32 SetClientNotify( IEventSink* pCallback );
     gint32 GetClientNotify( EventPtr& pEvt ) const;
 
+    TaskletPtr GetEndFwrdTask( bool bClear = false );
+    gint32 ClearFwrdTask();
+
     template< class ClassName >
     gint32 DelayRun(
         guint32 dwSecsDelay,
@@ -176,7 +180,7 @@ class CIfParallelTask
 {
 
     protected:
-    EnumTaskState m_iTaskState;
+    std::atomic< EnumTaskState > m_iTaskState;
 
     public:
     typedef CIfRetryTask super;
@@ -341,7 +345,8 @@ class CIfTaskGroup
     : public CIfRetryTask
 {
     EnumLogicOp m_iTaskRel;
-    EnumTaskState m_iTaskState = stateStarting;
+
+    std::atomic< EnumTaskState > m_iTaskState;
 
     bool m_bRunning = false;
     bool m_bCanceling = false;
@@ -365,6 +370,7 @@ class CIfTaskGroup
     {
         SetClassId( clsid( CIfTaskGroup ) );
         SetRelation( logicAND );
+        m_iTaskState = stateStarting;
     }
 
     virtual bool IsMultiThreadSafe()
@@ -399,14 +405,12 @@ class CIfTaskGroup
 
     inline EnumTaskState GetTaskState() const
     {
-        CStdRTMutex oTaskLock( GetLock() );
         return m_iTaskState;
     }
 
     inline void SetTaskState(
         EnumTaskState iState )
     {
-        CStdRTMutex oTaskLock( GetLock() );
         m_iTaskState = iState;
     }
 
@@ -559,45 +563,6 @@ class CIfParallelTaskGrp
     virtual gint32 RemoveTask( TaskletPtr& pTask );
     gint32 OnCancel( guint32 dwContext );
 };
-
-class CIfParallelTaskGrpRfc :
-    public CIfParallelTaskGrp
-{
-    guint32 m_dwMaxRunning = RFC_MAX_REQS;
-    guint32 m_dwMaxPending = RFC_MAX_PENDINGS;
-
-    public:
-    typedef CIfParallelTaskGrp super;
-    CIfParallelTaskGrpRfc( const IConfigDb* pCfg );
-
-    gint32 SetLimit(
-        guint32 dwMaxRunning,
-        guint32 dwMaxPending );
-
-    inline guint32 GetMaxRunning() const
-    { return m_dwMaxRunning; }
-
-    inline guint32 GetMaxPending() const
-    { return m_dwMaxPending; }
-
-    inline guint32 GetRunningCount() const
-    { return m_setTasks.size(); }
-
-    virtual gint32 RunTaskInternal(
-        guint32 dwContext ) override;
-
-    virtual gint32 OnChildComplete(
-        gint32 ret, CTasklet* pChild ) override;
-
-    gint32 AddAndRun( TaskletPtr& pTask );
-
-    virtual gint32 AppendTask(
-        TaskletPtr& pTask ) override ;
-
-    virtual gint32 InsertTask(
-        TaskletPtr& pTask ) override ;
-};
-
 
 class CIfStartRecvMsgTask
     : public CIfParallelTask

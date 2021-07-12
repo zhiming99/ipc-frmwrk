@@ -231,13 +231,99 @@ gint32 IpAddrToByteStr(
     return ret;
 }
 
+gint32 AddrIdMap::Find(
+    CConnParamsProxy& ocp,
+    guint32& dwPortId )
+{
+    if( !m_bSepConns )
+    {
+        ADDRID_MAP::iterator itr =
+            m_pMap->find( ocp );
+        if( itr == m_pMap->end() )
+            return -ENOENT ;
+        dwPortId = itr->second;
+    }
+    else
+    {
+        CConnParamsProxySepConns
+            ocpsc( ocp.GetCfg() );
+        ADDRID_MAP2::iterator itr =
+            m_pMap2->find( ocpsc );
+        if( itr == m_pMap2->end() )
+            return -ENOENT;
+        dwPortId = itr->second;
+    }
+    return 0;
+}
+
+gint32 AddrIdMap::Add(
+    CConnParamsProxy& ocp,
+    guint32 dwPortId )
+{
+    if( !m_bSepConns )
+    {
+        ADDRID_MAP::iterator itr =
+            m_pMap->find( ocp );
+        if( itr != m_pMap->end() )
+        {
+            if( itr->second == dwPortId )
+                return -EEXIST;
+        }
+        ( *m_pMap )[ ocp ] = dwPortId;
+    }
+    else
+    {
+        CConnParamsProxySepConns
+            ocpsc( ocp.GetCfg() );
+        ADDRID_MAP2::iterator itr =
+            m_pMap2->find( ocpsc );
+        if( itr != m_pMap2->end() )
+        {
+            if( itr->second == dwPortId )
+                return -EEXIST;
+        }
+        ( *m_pMap2 )[ ocpsc ] = dwPortId;
+    }
+    return 0;
+}
+
+gint32 AddrIdMap::Erase(
+    CConnParamsProxy& ocp )
+{
+    if( !m_bSepConns )
+    {
+        m_pMap->erase( ocp );
+    }
+    else
+    {
+        CConnParamsProxySepConns
+            ocpsc( ocp.GetCfg() );
+        m_pMap2->erase( ocpsc );
+    }
+    return 0;
+}
+
 CDBusBusPort::CDBusBusPort( const IConfigDb* pConfig )
     : super( pConfig ),
     m_pDBusConn( nullptr ),
     m_iLocalPortId( -1 ),
     m_iLpbkPortId( -1 )
 {
+    gint32 ret = 0;
     SetClassId( clsid( CDBusBusPort ) );
+    CIoManager* pMgr = GetIoMgr();
+    bool bSepConns = false;
+    guint32 dwRole = 0;
+    ret = pMgr->GetCmdLineOpt(
+        propRouterRole, dwRole );
+    if( SUCCEEDED( ret ) && ( dwRole & 0x01 ) )
+    {
+        ret = pMgr->GetCmdLineOpt(
+            propSepConns, bSepConns );
+        if( ERROR( ret ) )
+            bSepConns = false;
+    }
+    m_mapAddrToId.Initialize( bSepConns );
 }
 
 CDBusBusPort::~CDBusBusPort()
@@ -297,15 +383,13 @@ gint32 CDBusBusPort::BuildPdoPortName(
                     CStdRMutex oPortLock( GetLock() );
                     CConnParamsProxy ocps( pConnParams );
 
-                    ADDRID_MAP::const_iterator itr =
-                        m_mapAddrToId.find( ocps );
-                    if( itr != m_mapAddrToId.end() )
-                    {
-                        dwPortId = itr->second;
-                    }
-                    else
+                    ret = m_mapAddrToId.Find(
+                        ocps, dwPortId );
+
+                    if( ERROR( ret ) )
                     {
                         dwPortId = NewPdoId();
+                        ret = 0;
                     }
                 }
                 oCfgOpener[ propPortId ] = dwPortId;
@@ -468,17 +552,8 @@ gint32 CDBusBusPort::CreateRpcProxyPdoShared(
 
             // bind the ip addr and the port-id
             CStdRMutex oPortLock( GetLock() );
-            ADDRID_MAP::iterator
-                itr = m_mapAddrToId.find( ocp );
-            if( itr != m_mapAddrToId.end() )
-            {
-                if( itr->second == dwPortId )
-                {
-                    ret = -EEXIST;
-                    break;
-                }
-            }
-            m_mapAddrToId[ ocp ] = dwPortId;
+            ret = m_mapAddrToId.Add(
+                ocp, dwPortId );
         }
         // the pdo port `Start()' will be deferred
         // till the complete port stack is built.
@@ -627,6 +702,12 @@ gint32 CDBusBusPort::Start( IRP *pIrp )
             + string( "." )
             + strPortName;
 
+        if( !dbus_threads_init_default() )
+        {
+            ret = -ENOMEM;
+            break;
+        }
+
         m_pDBusConn = dbus_bus_get_private(
             DBUS_BUS_SESSION, error );
 
@@ -678,6 +759,12 @@ gint32 CDBusBusPort::Start( IRP *pIrp )
         }
         this->AddRef();
 
+        const char* szName =
+            dbus_bus_get_unique_name( m_pDBusConn );
+
+        DebugPrint( 0,
+            "dbus unique name: %s", szName );
+
         CParamList oParams;
 
         oParams.SetPointer(
@@ -688,7 +775,7 @@ gint32 CDBusBusPort::Start( IRP *pIrp )
             ( guint32* )m_pDBusConn );
 
         // flush connection every 500ms
-        oParams.Push( 500 );
+        oParams.Push( 5000 );
 
         ret = m_pFlushTask.NewObj(
             clsid( CDBusConnFlushTask ),
@@ -978,6 +1065,12 @@ DBusHandlerResult CDBusBusPort::OnMessageArrival(
             && ret == DBUS_HANDLER_RESULT_NOT_YET_HANDLED )
         {
             // reply with dbus error
+            DMsgPtr pDumpMsg( pMsg );
+            DebugPrint( GetPortState(),
+                "Error cannot find irp for response messages\n%s\n, port=%s, 0x%x",
+                pDumpMsg.DumpMsg().c_str(),
+                CoGetClassName( GetClsid() ), 
+                ( LONGWORD )this );
             ReplyWithError( pMessage );
             ret = DBUS_HANDLER_RESULT_HANDLED;
         }
@@ -1528,6 +1621,20 @@ gint32 CDBusTransLpbkMsgTask::operator()(
 
 extern gint64 GetRandom();
 static std::atomic< guint32 > dwDBusSerial( GetRandom() >> 32 );
+
+guint32 CDBusBusPort::LabelMessage(
+    DMsgPtr& pMsg )
+{
+    guint32 dwSerial = 0;
+    pMsg.GetSerial( dwSerial );
+    if( dwSerial == 0 )
+    {
+        dwSerial = dwDBusSerial++;
+        pMsg.SetSerial( dwSerial );
+    }
+    return dwSerial;
+}
+
 gint32 CDBusBusPort::ScheduleLpbkTask(
     MatchPtr& pFilter,
     DBusMessage *pDBusMsg,
@@ -1565,20 +1672,20 @@ gint32 CDBusBusPort::ScheduleLpbkTask(
         oParams.Push( bReq );
         DMsgPtr pMsg( pDBusMsg );
 
-        guint32 dwSerial = dwDBusSerial++;
+        guint32 dwSerial; 
         if( DBUS_MESSAGE_TYPE_METHOD_CALL
             == pMsg.GetType()
             && iType == matchClient )
         {
             // sending request, a serial number is
             // needed
-            pMsg.SetSerial( dwSerial );
+            dwSerial = LabelMessage( pMsg );
             if( pdwSerial )
                 *pdwSerial = dwSerial;
         }
         else
         {
-            pMsg.SetSerial( dwSerial );
+            dwSerial = LabelMessage( pMsg );
         }
 
         CIoManager* pMgr = GetIoMgr();
@@ -2349,7 +2456,7 @@ void CDBusBusPort::RemovePdoPort(
         return;
 
     CConnParamsProxy ocps( pConnParams );
-    m_mapAddrToId.erase( ocps );
+    m_mapAddrToId.Erase( ocps );
 }
 
 CDBusConnFlushTask::CDBusConnFlushTask(

@@ -1272,6 +1272,7 @@ class CCfgOpenerT : public CCfgDbOpener< T >
         }
         return false;
     }
+
 };
 
 typedef CCfgOpenerT< IConfigDb > CCfgOpenerBase;
@@ -1320,6 +1321,42 @@ class CCfgOpener : public CCfgOpenerBase
             m_pNewCfg.IsEmpty() )
             return -EFAULT;
         return m_pNewCfg->Deserialize( *pBuf );
+    }
+
+    using CCfgOpenerBase::IsEqualProp;
+    gint32 IsEqualProp( gint32 iProp, const IConfigDb* pObj )
+    {
+        gint32 ret = 0;
+
+        do{
+            if( pObj == nullptr )
+            {
+                ret = -EINVAL;
+                break;
+            }
+            if( m_pConstCfg == nullptr )
+            {
+                ret = -EFAULT;
+                break;
+            }
+
+            BufPtr pBuf;
+            ret = pObj->GetProperty( iProp, pBuf );
+            if( ERROR( ret ) )
+                break;
+
+            BufPtr pBuf2;
+            ret = this->GetProperty( iProp, pBuf2 );
+            if( ERROR( ret ) )
+                break;
+
+            if( *pBuf == *pBuf2 )
+                break;
+
+            ret = ERROR_FALSE;
+
+        }while( 0 );
+        return ret;
     }
 };
 

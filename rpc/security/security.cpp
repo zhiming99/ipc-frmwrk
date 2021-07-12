@@ -331,7 +331,8 @@ gint32 CRpcTcpBridgeAuth::EnableInterfaces()
 gint32 CRpcTcpBridgeAuth::OnPostStop(
     IEventSink* pCallback )
 {
-    return SetSessHash( "", false );
+    SetSessHash( "", false );
+    return super::OnPostStop( pCallback );
 }
 
 gint32 CRpcTcpBridgeAuth::SetSessHash(
@@ -608,6 +609,7 @@ gint32 CRpcTcpBridgeAuth::OnLoginComplete(
 
         if( ERROR( iRet ) )
         {
+            OnServiceComplete( pResp, pCallback );
             ret = iRet;
             break;
         }
@@ -1244,6 +1246,12 @@ gint32 CRpcReqForwarderAuth::LocalLoginInternal(
         if( ERROR( ret ) )
             break;
 
+        if( IsSepConns() )
+        {
+            CCfgOpener oConnCfg( pConnParams );
+            oConnCfg[ propSrcUniqName ] =
+                strSrcUniqName;
+        }
         std::string strRouterPath;
         ret = oCfg.GetStrProp(
             propRouterPath, strRouterPath );
@@ -1280,6 +1288,13 @@ gint32 CRpcReqForwarderAuth::LocalLoginInternal(
             if( ERROR( ret ) )
                 break;
 
+            if( ret == 1 && IsRfcEnabled() )
+            {
+                ret = CreateGrpRfc( dwPortId,
+                    strSrcUniqName, strSender );
+                if( ERROR( ret ) )
+                    break;
+            }
             // schedule a checkrouter path task
             oReqCtx.SetIntProp(
                 propConnHandle, dwPortId );
@@ -1346,7 +1361,6 @@ gint32 CRpcReqForwarderAuth::LocalLoginInternal(
             // create the authenticate proxy which
             // will finally create the bridge
             // proxy on success.
-            CParamList oParams;
             ret = CreateBridgeProxyAuth(
                 pCallback, pCfg, pInvTask );
         }
@@ -2044,7 +2058,7 @@ gint32 CRpcTcpBridgeProxyAuth::OnPostStop(
     IEventSink* pCallback )
 {
     SetSessHash( "", false );
-    return 0;
+    return super::OnPostStop( pCallback );
 }
 
 gint32 CRpcTcpBridgeProxyAuth::SetSessHash(
@@ -2371,6 +2385,14 @@ gint32 CRpcReqForwarderAuth::OnSessImplLoginComplete(
 
             if( ERROR( ret ) )
                 break;
+
+            if( ret == 1 && IsRfcEnabled() )
+            {
+                ret = CreateGrpRfc( dwPortId,
+                    strUniqName, strSender );
+                if( ERROR( ret ) )
+                    break;
+            }
         }
         // update the connparams with the newest
         // one from the bridge proxy.
@@ -2741,23 +2763,14 @@ gint32 CRpcRouterReqFwdrAuth::GetBridgeProxy(
     return ret;
 }
 
-gint32 CRpcRouterReqFwdrAuth::DecRefCount(
-        guint32 dwPortId,
-        const std::string& strSrcUniqName,
-        const std::string& strSrcDBusName )
+gint32 CRpcRouterReqFwdrAuth::StopProxyNoRef(
+    guint32 dwPortId )
 {
-    gint32 ret = super::DecRefCount( dwPortId,
-        strSrcUniqName, strSrcDBusName );
-
-    if( ERROR( ret ) )
-        return ret;
-
-    if( ret != 1 )
-        return ret;
+    gint32 ret = 0;
 
     do{
-        CStdRMutex oRouterLock( GetLock() );
         RegObjPtr pReg;
+        CStdRMutex oRouterLock( GetLock() );
         for( auto elem : m_mapRefCount )
         {
             if( elem.first->GetPortId() == dwPortId )
@@ -2800,6 +2813,31 @@ gint32 CRpcRouterReqFwdrAuth::DecRefCount(
             oRouterLock.Unlock();
             pspp->StopSessImpl();
         }
+
+    }while( 0 );
+
+    return ret;
+}
+
+gint32 CRpcRouterReqFwdrAuth::DecRefCount(
+        guint32 dwPortId,
+        const std::string& strSrcUniqName,
+        const std::string& strSrcDBusName )
+{
+    gint32 ret = super::DecRefCount( dwPortId,
+        strSrcUniqName, strSrcDBusName );
+
+    if( ERROR( ret ) )
+        return ret;
+
+    if( ret != 1 )
+        return ret;
+
+    do{
+        ret = StopProxyNoRef( dwPortId );
+        if( ERROR( ret ) )
+            break;
+
         ret = 1;
 
     }while( 0 );

@@ -136,21 +136,28 @@ CTaskQueue::CTaskQueue()
 void CTaskQueue::AddTask( TaskletPtr& pTask )
 {
     bool bAdd = true;
+    if( pTask.IsEmpty() )
+        return;
 
     CStdRMutex a( m_oLock );
-    if( !pTask.IsEmpty() )
+    if( m_queTasks.size() >= 2 )
     {
-        for( auto& pElem : m_queTasks )
+        deque< TaskletPtr >::iterator
+            itr = m_queTasks.begin() + 1;
+        while( itr != m_queTasks.end() )
         {
-            if( pElem == pTask )
+            if( *itr == pTask )
             {
                 bAdd = false;
                 break;
             }
+            ++itr;
         }
     }
-    if( bAdd )
+    else
+    {
         m_queTasks.push_back( pTask ); 
+    }
 }
 
 gint32 CTaskQueue::RemoveTask( TaskletPtr& pTask )

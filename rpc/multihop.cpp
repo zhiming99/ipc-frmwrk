@@ -1160,6 +1160,20 @@ gint32 CRpcRouterBridge::OnRmtSvrOfflineMH(
                 continue;
 
             pGrp->AppendTask( pTask );
+
+            FWRDREQS vecReqs;
+            ret = pBridge->FindFwrdReqsByPath(
+                strPath, vecReqs );
+            if( ERROR( ret ) )
+                continue;
+
+            ObjVecPtr pvecTasks( true );
+            for( auto pTask : vecReqs )
+            {
+                ( *pvecTasks )().push_back(
+                    pTask.first );
+            }
+            pBridge->CancelInvTasks( pvecTasks );
         }
 
         if( pGrp->GetTaskCount() > 0 )
@@ -1225,6 +1239,7 @@ gint32 CRpcRouterBridge::OnClearRemoteEventsComplete(
 gint32 CRpcRouterBridge::ClearRemoteEventsMH(
     IEventSink* pCallback,
     ObjPtr& pVecMatches,
+    ObjPtr& pMapTaskIds,
     bool bForceClear )
 {
     if( unlikely( pVecMatches.IsEmpty() ||
@@ -1232,10 +1247,13 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
         return -EINVAL;
 
     ObjVecPtr pMatches( pVecMatches );
-    if( unlikely( pMatches.IsEmpty() ) )
+    ObjMapPtr pTaskIdsIn( pMapTaskIds );
+    if( unlikely( pMatches.IsEmpty() &&
+        pTaskIdsIn.IsEmpty() ) )
         return -EINVAL;
 
-    if( unlikely( ( *pMatches )().size() == 0 ) )
+    if( unlikely( ( *pMatches )().size() == 0 &&
+        ( *pTaskIdsIn )().size() == 0 ) )
         return -EINVAL;
 
     if( unlikely( !IsConnected() ) )
@@ -1246,6 +1264,10 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
     do{
         std::vector< ObjPtr >& vecMatches =
             ( *pMatches )();
+
+        ObjMapPtr pTaskIds( pMapTaskIds );
+        std::map< ObjPtr, QwVecPtr >& mapTaskIds =
+            ( *pTaskIds )();
 
         CParamList oParams;
         oParams[ propEventSink ] =
@@ -1261,28 +1283,9 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
         if( ERROR( ret ) )
             break;
 
-        TaskletPtr pRespCb;
-        if( !bForceClear )
-        {
-            CCfgOpener oReqCtx;
-            oReqCtx[ propReturnValue ] = 0;
+        pTaskGrp->SetClientNotify( pCallback );
 
-            ret = NEW_PROXY_RESP_HANDLER2(
-                pRespCb, ObjPtr( this ),
-                &CRpcRouterBridge::OnClearRemoteEventsComplete,
-                pCallback, oReqCtx.GetCfg() );
-
-            if( ERROR( ret ) )
-                break;
-
-            pTaskGrp->SetClientNotify( pRespCb );
-        }
-        else
-        {
-            pTaskGrp->SetClientNotify( pCallback );
-        }
-
-        std::map< std::string, std::vector< ObjPtr > >
+        std::map< guint32, std::vector< ObjPtr > >
             mapIfMatches;
 
         for( auto pObj : vecMatches )
@@ -1290,8 +1293,8 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
             MatchPtr pMatch( pObj );
             MatchPtr pRmtMatch;
 
-            CCfgOpenerObj oMatch(
-                ( CObjBase* )pObj );
+            CCfgOpener oMatch(
+                ( IConfigDb* )pMatch->GetCfg() );
 
             ret = GetMatchToAdd(
                 pMatch, true, pRmtMatch );
@@ -1303,7 +1306,8 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
 
             if( !bForceClear )
             {
-                if( ret == EEXIST || ERROR( ret ) )
+                if( ret == EEXIST ||
+                    ERROR( ret ) )
                 {
                     ret = 0;
                     continue;
@@ -1319,14 +1323,19 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
             if( strPath.size() < 2 )
                 continue;
 
-            std::string strNode;
-            ret = GetNodeName(
-                strPath, strNode );
+            guint32 dwPortId = 0;
+            ret = oMatch.GetIntProp(
+                propPrxyPortId, dwPortId );
             if( ERROR( ret ) )
                 continue;
             
             std::vector< ObjPtr >& vecIfMatches =
-                mapIfMatches[ strNode ];
+                mapIfMatches[ dwPortId ];
+
+            std::string strNode;
+            ret = GetNodeName( strPath, strNode );
+            if( ERROR( ret ) )
+                continue;
 
             strPath = strPath.substr(
                 1 + strNode.size() );
@@ -1357,28 +1366,45 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
             if( ERROR( ret ) )
                 continue;
 
+            std::map< ObjPtr, QwVecPtr >::iterator
+                itr = mapTaskIds.find( ObjPtr( pIf ) );
+
+            QwVecPtr pvecTaskIds( true );
+            if( itr != mapTaskIds.end() )
+            {
+                pvecTaskIds = itr->second;
+                mapTaskIds.erase( itr );
+            }
+                
+            
             CRpcTcpBridgeProxy* pProxy = pIf;
 
             TaskletPtr pTask;
-            if( elem.second.size() < 2 )
-            {
-                ret = DEFER_IFCALLEX_NOSCHED2(
-                    0, pTask, ObjPtr( pProxy ),
-                    &CRpcTcpBridgeProxy::DisableRemoteEvent,
-                    ( IEventSink* )nullptr,
-                    ( IMessageMatch* )elem.second[ 0 ] );
-            }
-            else
-            {
-                ObjVecPtr pvecIfMat( true );
-                ( *pvecIfMat )() = elem.second;
+            ObjVecPtr pvecIfMat( true );
+            ( *pvecIfMat )() = elem.second;
 
-                ret = DEFER_IFCALLEX_NOSCHED2(
-                    1, pTask, ObjPtr( pProxy ),
-                    &CRpcTcpBridgeProxy::ClearRemoteEvents,
-                    ObjPtr( pvecIfMat ),
-                    ( IEventSink* )nullptr );
-            }
+            ret = DEFER_IFCALLEX_NOSCHED2(
+                1, pTask, ObjPtr( pProxy ),
+                &CRpcTcpBridgeProxy::ClearRemoteEvents,
+                ObjPtr( pvecIfMat ),
+                ObjPtr( pvecTaskIds ),
+                ( IEventSink* )nullptr );
+
+            if( SUCCEEDED( ret ) )
+                pTaskGrp->AppendTask( pTask ); \
+        }
+
+        ObjVecPtr pvecIfMat( true );
+        for( auto elem : mapTaskIds )
+        {
+            TaskletPtr pTask;
+            ret = DEFER_IFCALLEX_NOSCHED2(
+                1, pTask, elem.first,
+                &CRpcTcpBridgeProxy::ClearRemoteEvents,
+                ObjPtr( pvecIfMat ),
+                ObjPtr( elem.second ),
+                ( IEventSink* )nullptr );
+
             if( SUCCEEDED( ret ) )
                 pTaskGrp->AppendTask( pTask ); \
         }
@@ -1387,19 +1413,15 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
         if( pTaskGrp->GetTaskCount() == 0 )
         {
             pTaskGrp->ClearClientNotify();
-            pRespCb.Clear();
+            pTaskGrp.Clear();
             break;
         }
 
-        pTaskGrp->MarkPending();
         TaskletPtr pTask = ObjPtr( pTaskGrp );
-        ret = DEFER_CALL( GetIoMgr(), this,
-            &CRpcServices::RunManagedTask,
-            pTask, false );
+        ret = GetIoMgr()->RescheduleTask( pTask );
 
         if( ERROR( ret ) )
         {
-            pTaskGrp->MarkPending( false );
             ( *pTask )( eventCancelTask );
         }
         else
@@ -1409,7 +1431,7 @@ gint32 CRpcRouterBridge::ClearRemoteEventsMH(
 
     }while( 0 );
 
-    if( ERROR( ret ) )
+    if( ERROR( ret ) && pCallback != nullptr )
     {
         CParamList oResp;
         oResp[ propReturnValue ] = ret;

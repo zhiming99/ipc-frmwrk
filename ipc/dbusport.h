@@ -151,7 +151,8 @@ class CRpcBasePort : public CPort
 
     gint32 ClearMatchMapInternal(
         MatchMap& oMap,
-        std::vector< IrpPtr >& vecPendingIrps );
+        std::vector< IrpPtr >& vecPendingIrps,
+        std::vector< MatchPtr>& vecMatches );
 
     virtual gint32 ClearDBusSetting(
         IMessageMatch* pMatch ) = 0;
@@ -160,7 +161,8 @@ class CRpcBasePort : public CPort
         IMessageMatch* pMatch ) = 0;
 
     virtual gint32 ClearMatchMap(
-        std::vector< IrpPtr >& vecPendingIrps );
+        std::vector< IrpPtr >& vecPendingIrps,
+        std::vector< MatchPtr>& vecMatches );
 
     gint32 RemoveIrpFromMapInternal(
         IRP* pIrp, MatchMap& oMap );
@@ -260,7 +262,8 @@ class CRpcBasePortEx : public CRpcBasePort
     MatchMap    m_mapReqTable;
 
     virtual gint32 ClearMatchMap(
-        std::vector< IrpPtr >& vecPendingIrps );
+        std::vector< IrpPtr >& vecPendingIrps,
+        std::vector< MatchPtr>& vecMatches );
 
     virtual gint32 RemoveIrpFromMap( IRP* pIrp );
 
@@ -1186,15 +1189,68 @@ class CConnParamsProxy : public CConnParams
     }
 };
 
+class CConnParamsProxySepConns :
+    public CConnParamsProxy
+{
+    public:
+    typedef CConnParamsProxy super;
+    CConnParamsProxySepConns( const IConfigDb* pCfg ) :
+        super( pCfg )
+    {}
+
+    CConnParamsProxySepConns( const CfgPtr& pCfg ) :
+        super( pCfg )
+    {}
+
+    CConnParamsProxySepConns(
+        const CConnParamsProxySepConns& rhs ) :
+        super( rhs )
+    {}
+
+    bool less(const CConnParamsProxySepConns& rhs ) const
+    {
+        CCfgOpener oCfg( ( IConfigDb* )GetCfg() );
+        IConfigDb* pRhs = rhs.GetCfg();
+        CCfgOpener oCfg2( pRhs );
+
+        stdstr strVal1;
+        oCfg.GetStrProp(
+            propSrcUniqName, strVal1 );
+
+        stdstr strVal2;
+        oCfg2.GetStrProp(
+            propSrcUniqName, strVal2 );
+        if( strVal1 < strVal2 )
+            return true;
+
+        if( strVal1 > strVal2 )
+            return false;
+
+        return super::less( rhs );
+    }
+};
+
 }
 
 namespace std
 {
     using namespace rpcf;
     template<>
+    struct less<CConnParamsProxySepConns>
+    {
+        bool operator()(
+            const CConnParamsProxySepConns& k1,
+            const CConnParamsProxySepConns& k2) const
+        {
+            return k1.less( k2 );
+        }
+    };
+    template<>
     struct less<CConnParamsProxy>
     {
-        bool operator()( const CConnParamsProxy& k1,  const CConnParamsProxy& k2) const
+        bool operator()(
+            const CConnParamsProxy& k1,
+            const CConnParamsProxy& k2) const
         {
             return k1.less( k2 );
         }
@@ -1203,7 +1259,9 @@ namespace std
     template<>
     struct less<CConnParams>
     {
-        bool operator()(const CConnParams& k1, const CConnParams& k2) const
+        bool operator()(
+            const CConnParams& k1,
+            const CConnParams& k2) const
         {
             return k1.less( k2 );
         }
@@ -1212,6 +1270,49 @@ namespace std
 
 namespace rpcf
 {
+
+using ADDRID_MAP =
+    std::map< CConnParamsProxy, guint32 >;
+
+using ADDRID_MAP2 =
+    std::map< CConnParamsProxySepConns, guint32 >;
+
+struct AddrIdMap
+{
+    bool m_bSepConns = false;
+    ADDRID_MAP* m_pMap = nullptr;
+    ADDRID_MAP2* m_pMap2 = nullptr;
+
+    ~AddrIdMap()
+    {
+        if( m_bSepConns )
+            delete m_pMap2;
+        else
+            delete m_pMap;
+        m_pMap2 = nullptr;
+        m_pMap = nullptr;
+    }
+
+    inline void Initialize( bool bSepConns )
+    {
+        m_bSepConns = bSepConns;
+        if( bSepConns )
+           m_pMap2 = new ADDRID_MAP2;
+        else
+           m_pMap = new ADDRID_MAP;
+    }
+
+    gint32 Find(
+        CConnParamsProxy& ocp,
+        guint32& dwPortId );
+
+    gint32 Add(
+        CConnParamsProxy& ocp,
+        guint32 dwPortId );
+
+    gint32 Erase(
+        CConnParamsProxy& ocp );
+};
 
 class CDBusBusPort : public CGenericBusPortEx
 {
@@ -1238,10 +1339,7 @@ class CDBusBusPort : public CGenericBusPortEx
 
     std::map< std::string, gint32 > m_mapRules;
 
-    using ADDRID_MAP =
-        std::map< CConnParamsProxy, guint32 >;
-
-    ADDRID_MAP m_mapAddrToId;
+    AddrIdMap m_mapAddrToId;
 
     gint32 CreateLocalDBusPdo(
         const IConfigDb* pConfig,
@@ -1421,6 +1519,7 @@ class CDBusBusPort : public CGenericBusPortEx
         const std::string& strDest );
 
 	virtual gint32 PreStop( IRP* pIrp );
+    static guint32 LabelMessage( DMsgPtr& pMsg );
 };
 
 class CDBusConnFlushTask 

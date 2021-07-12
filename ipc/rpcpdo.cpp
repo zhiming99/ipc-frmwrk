@@ -113,7 +113,7 @@ gint32 CRpcBasePort::DispatchSignalMsg(
         if( oMe.m_queWaitingIrps.empty() )
         {
             if( oMe.m_quePendingMsgs.size()
-                > MAX_PENDING_MSG )
+                > MAX_DBUS_REQS )
             {
                 // discard the oldest msg if too many
                 oMe.m_quePendingMsgs.pop_front();
@@ -292,12 +292,12 @@ gint32 CRpcBasePort::DispatchRespMsg(
         ret = FindIrpForResp( pMsg, pIrp );
         if( ret == -ENOENT )
         {
-            DMsgPtr pDumpMsg( pMsg );
+            /*DMsgPtr pDumpMsg( pMsg );
             DebugPrint( GetPortState(),
                 "Error cannot find irp for response messages\n%s\n, port=%s, 0x%x",
                 pDumpMsg.DumpMsg().c_str(),
                 CoGetClassName( GetClsid() ), 
-                ( LONGWORD )this );
+                ( LONGWORD )this );*/
         }
 
         if( ERROR( ret ) )
@@ -573,7 +573,6 @@ gint32 CRpcBasePort::HandleRegMatch(
             break;
         }
 
-        CStdRMutex oPortLock( GetLock() );
 
         MatchPtr matchPtr( pMatch );
         ret = GetMatchMap( pIrp, pMap );
@@ -581,12 +580,32 @@ gint32 CRpcBasePort::HandleRegMatch(
         if( ERROR( ret ) )
             break;
 
+        bool bNew = false;
+        CStdRMutex oPortLock( GetLock() );
         MatchMap::iterator itr = 
             pMap->find( matchPtr );
+        MATCH_ENTRY* pme = nullptr;
         if( itr == pMap->end() )
         {
+            // new match rule
+            // let's register a match 
+            bNew = true;
+        }
+        else
+        {
+            itr->second.AddRef();
+            if( !itr->second.IsConnected() )
+                ret = -ENOTCONN;
+        }
+        oPortLock.Unlock();
+        if( bNew )
+        {
+            // add a dbus match rule, 
+            // Note: the operation contains dbus
+            // connection lock, and cannot put
+            // within the port lock, otherwise,
+            // deadlock can happen.
             MATCH_ENTRY oMe;
-            // add a dbus match rule
             ret = SetupDBusSetting( pMatch );
             if( ERROR( ret ) )
                 break;
@@ -602,18 +621,9 @@ gint32 CRpcBasePort::HandleRegMatch(
             {
                 oMe.SetConnected( true );
             }
-
             oMe.AddRef();
-            // new match rule
-            // let's register a match 
+            oPortLock.Lock();
             ( *pMap )[ matchPtr ] = oMe;
-
-        }
-        else
-        {
-            itr->second.AddRef();
-            if( !itr->second.IsConnected() )
-                ret = -ENOTCONN;
         }
 
     }while( 0 );
@@ -660,18 +670,18 @@ gint32 CRpcBasePort::HandleUnregMatch( IRP* pIrp )
             gint32 iRefCount = oEntry.Release();
             if( iRefCount == 0 )
             {
-                // nobody referencing this match rule
-                // remove it from the req/evt table
-                ret = ClearDBusSetting( pMatch );
-                if( ERROR( ret ) )
-                    break;
-
                 if( oEntry.m_quePendingMsgs.size() )
                     oEntry.m_quePendingMsgs.clear();
 
                 MATCH_ENTRY tempEnt = oEntry;
                 pMap->erase( matchPtr );
                 oPortLock.Unlock();
+
+                // nobody referencing this match rule
+                // remove it from the req/evt table
+                ret = ClearDBusSetting( pMatch );
+                if( ERROR( ret ) )
+                    break;
 
                 // completing the irps with error 
                 // and pending on the match
@@ -952,9 +962,9 @@ gint32 CRpcBasePort::SubmitIoctlCmd( IRP* pIrp )
 
 gint32 CRpcBasePort::ClearMatchMapInternal(
     MatchMap& oMap,
-    vector< IrpPtr >& vecPendingIrps )
+    vector< IrpPtr >& vecPendingIrps,
+    vector< MatchPtr >& vecMatches )
 {
-
     gint32 ret = 0;
     // note: this method must be called with
     // the port locked
@@ -985,7 +995,7 @@ gint32 CRpcBasePort::ClearMatchMapInternal(
         {
             oMe.m_quePendingMsgs.clear();
         }
-        ClearDBusSetting( itrMe->first );
+        vecMatches.push_back( itrMe->first );
         oMap.erase( itrMe );
         itrMe = oMap.begin();
     }
@@ -993,10 +1003,13 @@ gint32 CRpcBasePort::ClearMatchMapInternal(
 }
 
 gint32 CRpcBasePort::ClearMatchMap(
-    vector< IrpPtr >& vecPendingIrps )
+    vector< IrpPtr >& vecPendingIrps,
+    vector< MatchPtr >& vecMatches )
 {
     return ClearMatchMapInternal(
-        m_mapEvtTable, vecPendingIrps );
+        m_mapEvtTable,
+        vecPendingIrps,
+        vecMatches );
 }
 
 gint32 CRpcBasePort::RemoveIrpFromMapInternal(
@@ -1108,7 +1121,9 @@ gint32 CRpcBasePort::CancelAllIrps( gint32 iErrno )
 
         vector< IrpPtr > vecIrpRemaining;
 
-        ret = ClearMatchMap( vecIrpRemaining );
+        vector< MatchPtr > vecMatches;
+        ret = ClearMatchMap(
+            vecIrpRemaining, vecMatches );
         if( ERROR( ret ) )
             break;
 
@@ -1123,6 +1138,11 @@ gint32 CRpcBasePort::CancelAllIrps( gint32 iErrno )
 
         m_mapSerial2Resp.clear();
         oPortLock.Unlock();
+
+        for( auto elem : vecMatches )
+        {
+            ClearDBusSetting( elem );
+        }
 
         vector< IrpPtr >::iterator itrIrp =
             vecIrpRemaining.begin();
@@ -1625,18 +1645,21 @@ gint32 CRpcBasePortEx::RemoveIrpFromMap(
 }
 
 gint32 CRpcBasePortEx::ClearMatchMap(
-    vector< IrpPtr >& vecPendingIrps )
+    vector< IrpPtr >& vecPendingIrps,
+    vector< MatchPtr >& vecMatches )
 {
     gint32 ret = 0;
 
     ret = super::ClearMatchMap(
-        vecPendingIrps );
+        vecPendingIrps, vecMatches );
 
     if( ERROR( ret ) )
         return ret;
 
     ret = ClearMatchMapInternal(
-        m_mapReqTable, vecPendingIrps );
+        m_mapReqTable,
+        vecPendingIrps,
+        vecMatches );
 
     return ret;
 }
@@ -1689,7 +1712,10 @@ gint32 CRpcBasePortEx::DispatchReqMsg(
                     propQueSize, dwQueSize );
 
                 if( ERROR( ret ) )
-                    dwQueSize = MAX_PENDING_MSG;
+                {
+                    dwQueSize = MAX_DBUS_REQS;
+                    ret = 0;
+                }
 
                 if( dwQueSize == 0 )
                 {
@@ -1715,7 +1741,7 @@ gint32 CRpcBasePortEx::DispatchReqMsg(
                 {
                     ome.m_quePendingMsgs.push_back( pMsg );
                     if( ome.m_quePendingMsgs.size()
-                        > MAX_PENDING_MSG )
+                        > dwQueSize )
                     {
                         // discard the oldest msg
                         ome.m_quePendingMsgs.pop_front();
@@ -2085,18 +2111,12 @@ gint32 CRpcPdoPort::HandleSendReq( IRP* pIrp )
 
         ret = -EINVAL;
 
-        // NOTE: there are slim chances, that the
-        // response message can arrive before the
-        // irp enters m_mapSerial2Resp
-        CStdRMutex oPortLock( GetLock() );
-
         if( dwIoDir == IRP_DIR_INOUT ||
             dwIoDir == IRP_DIR_OUT )
         {
             DMsgPtr pMsg = *pCtx->m_pReqData;
 
             ret = IsIfSvrOnline( pMsg );
-
             if( ret == ENOTCONN )
             {
                 // not connected yet, no need to
@@ -2108,19 +2128,42 @@ gint32 CRpcPdoPort::HandleSendReq( IRP* pIrp )
             if( ERROR( ret ) )
                 break;
 
-            // DebugPrint( 0, "probe: Send Dbus Msg" );
-            ret = SendDBusMsg( pMsg, &dwSerial );
+            CDBusBusPort *pBusPort = static_cast
+                < CDBusBusPort* >( m_pBusPort );
+
+            dwSerial =
+                pBusPort->LabelMessage( pMsg );
+
+            if( dwIoDir == IRP_DIR_INOUT )
+            {
+                // NOTE: there are slim chances,
+                // that the response message
+                // arrives before the irp enters
+                // m_mapSerial2Resp after sending,
+                // so better add the irp to
+                // m_mapSerial2Resp ahead of
+                // sending.
+                CStdRMutex oPortLock( GetLock() );
+                m_mapSerial2Resp[ dwSerial ] =
+                    IrpPtr( pIrp );
+            }
+            else
+            {
+                pMsg.SetNoReply( true );
+            }
+
+            ret = SendDBusMsg( pMsg, nullptr );
+            if( SUCCEEDED( ret ) &&
+                dwIoDir == IRP_DIR_INOUT )
+                ret = STATUS_PENDING;
         }
 
-        if( ERROR( ret ) )
-            break;
-
-        if( dwIoDir == IRP_DIR_INOUT && dwSerial != 0 )
+        if( ERROR( ret ) &&
+            dwIoDir == IRP_DIR_INOUT &&
+            dwSerial != 0 )
         {
-            // waiting for response
-            IrpPtr irpPtr( pIrp );
-            m_mapSerial2Resp[ dwSerial ] = irpPtr;
-            ret = STATUS_PENDING;
+            CStdRMutex oPortLock( GetLock() );
+            m_mapSerial2Resp.erase( dwSerial );
         }
 
     }while( 0 );
@@ -2166,7 +2209,15 @@ gint32 CRpcPdoPort::HandleSendEvent( IRP* pIrp )
             if( ERROR( ret ) )
                 break;
 
-            ret = SendDBusMsg( pMsg, &dwSerial );
+            CDBusBusPort *pBusPort = static_cast
+                < CDBusBusPort* >( m_pBusPort );
+
+            dwSerial =
+                pBusPort->LabelMessage( pMsg );
+
+            pMsg.SetNoReply( true );
+
+            ret = SendDBusMsg( pMsg, nullptr );
         }
         else
         {

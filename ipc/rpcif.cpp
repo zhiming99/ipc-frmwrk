@@ -236,15 +236,28 @@ gint32 CRpcBaseOperations::AddPortProps()
         if( SUCCEEDED( ret ) )
         {
             CInterfaceState* pStat = m_pIfStat;
-            if( pStat->exist( propSrcDBusName ) )
-                return 0;
-            // Now the proxy will have a valid sender
-            // name. And on server side, the
-            // propSrcDBusName should be obtained from
-            // the server name and the object name
-            ret = this->SetProperty(
-                propSrcDBusName, *pBuf );
+            if( !pStat->exist( propSrcDBusName ) )
+            {
+                // Now the proxy will have a valid
+                // sender name. And on server
+                // side, the propSrcDBusName
+                // should be obtained from the
+                // server name and the object name
+                ret = this->SetProperty(
+                    propSrcDBusName, *pBuf );
+            }
         }
+        pBuf->Resize( 0 );
+        ret = GetIoMgr()->GetPortProp(
+            GetPortHandle(),
+            propSrcUniqName,
+            pBuf );
+        if( SUCCEEDED( ret ) )
+        {
+            ret = this->SetProperty(
+                propSrcUniqName, *pBuf );
+        }
+
     }
     return ret;
 }
@@ -1937,7 +1950,7 @@ gint32 CRpcInterfaceBase::SetReqQueSize(
     if( pMatch == nullptr )
         return -EINVAL;
 
-    if( dwSize > MAX_PENDING_MSG )
+    if( dwSize > MAX_DBUS_REQS )
         return -EINVAL;
 
     do{
@@ -2369,7 +2382,7 @@ gint32 CRpcServices::RebuildMatches()
         }
         
         bool bPausable = false;
-        guint32 dwQueSize = MAX_PENDING_MSG;
+        guint32 dwQueSize = MAX_DBUS_REQS;
 
         for( auto pMatch : m_vecMatches )
         {
@@ -2406,7 +2419,7 @@ gint32 CRpcServices::RebuildMatches()
             if( ERROR( ret ) )
                 bPausable = false;
 
-            dwQueSize = MAX_PENDING_MSG;
+            dwQueSize = MAX_DBUS_REQS;
 
             if( bPausable && bPauseOnStart )
                 dwQueSize = 0;
@@ -2422,7 +2435,7 @@ gint32 CRpcServices::RebuildMatches()
         oMatchCfg.SetIntProp( propIid,
             GetClsid() );
 
-        dwQueSize = MAX_PENDING_MSG;
+        dwQueSize = MAX_DBUS_REQS;
 
         // set the request que size for the
         // interface
@@ -5870,7 +5883,7 @@ gint32 CInterfaceServer::RestartListening(
                 // start all the interfaces
             }
         }
-        SetReqQueSize( pMsgMatch, MAX_PENDING_MSG );
+        SetReqQueSize( pMsgMatch, MAX_DBUS_REQS );
     }
 
     return ret;
@@ -7041,6 +7054,10 @@ gint32 CInterfaceServer::InitUserFuncs()
         CInterfaceServer::KeepAliveRequest,
         SYS_METHOD_KEEPALIVEREQ );
 
+    ADD_SERVICE_HANDLER(
+        CInterfaceServer::ForceCancelRequests,
+        SYS_METHOD_FORCECANCELREQS );
+
     END_IFHANDLER_MAP;
 
     return ret;
@@ -7175,6 +7192,68 @@ gint32 CInterfaceServer::UserCancelRequest(
 
     SetResponse( pCallback,
         oMyResp.GetCfg() );
+
+    return ret;
+}
+
+gint32 CInterfaceServer::ForceCancelRequests(
+    IEventSink* pCallback,
+    ObjPtr& pTaskIds )
+{
+    // let's search through the tasks to find the
+    // specified task to cancel
+    gint32 ret = 0;
+    do{
+        if( pTaskIds.IsEmpty() )
+        {
+            ret = -ENOENT;
+            break;
+        }
+
+        QwVecPtr pvecTasks = pTaskIds;
+        if( pvecTasks.IsEmpty() )
+        {
+            ret = -EFAULT;
+            break;
+        }
+
+        std::vector< guint64 >& vecTaskIds =
+            ( *pvecTasks )();
+
+        TaskGrpPtr pTaskGrp;
+        GetParallelGrp( pTaskGrp );
+        if( pTaskGrp.IsEmpty() )
+            break;
+
+        for( auto elem : vecTaskIds )
+        {
+            TaskletPtr pTask;
+
+            ret = pTaskGrp->FindTaskByRmtId(
+                elem, pTask );
+            if( ERROR( ret ) )
+            {
+                ret = 0;
+                continue;
+            }
+
+            CIfInvokeMethodTask* pInvTask = pTask;
+            gint32 iRet = ERROR_CANCEL;
+
+            pInvTask->OnEvent(
+                eventCancelTask, iRet, 0, 0 );
+
+            DebugPrint( 0,
+                "Inv Task Canceled silently, 0x%llx",
+                elem );
+        }
+
+    }while( 0 );
+
+    // set the response for this cancel request
+    CParamList oMyResp;
+    oMyResp[ propReturnValue ] = ret;
+    SetResponse( pCallback, oMyResp.GetCfg() );
 
     return ret;
 }

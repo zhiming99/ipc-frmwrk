@@ -472,7 +472,7 @@ gint32 CDBusIoCallback::DoToggleWatch(
         CEvLoop* pLoop = m_pParent->GetLoop();
         if( bEnabled )
         {
-            pLoop->StopSource( m_hWatch, srcIo );
+            // pLoop->StopSource( m_hWatch, srcIo );
             pLoop->StartSource( m_hWatch, srcIo );
         }
         else

@@ -2127,6 +2127,15 @@ gint32 CIoManager::GetRouterName(
     return 0;
 }
 
+gint32 CIoManager::AddSeqTask(
+    TaskletPtr& pTask, bool bLong )
+{
+    CRpcServices* pIf = GetSyncIf();
+    if( pIf == nullptr )
+        return -EFAULT;
+
+    return pIf->AddSeqTask( pTask, bLong );
+}
 gint32 CIoManager::AddAndRun(
     TaskletPtr& pTask, bool bImmediate )
 {

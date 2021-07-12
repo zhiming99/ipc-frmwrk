@@ -433,8 +433,7 @@ class CStlIntMap
     public:
     typedef CStlMap< guint32, guint32 > super;
 
-    CStlIntMap()
-        : CStlMap< guint32, guint32>()
+    CStlIntMap() : super()
     {
         SetClassId( clsid( CStlIntMap ) );
     }
@@ -448,6 +447,21 @@ class CStlIntMap
 
 typedef CAutoPtr< clsid( CStlIntMap ), CStlIntMap > IntMapPtr;
 
+class CStlObjMap
+    : public CStlMap< ObjPtr, QwVecPtr > 
+{
+ 
+    public:
+    typedef CStlMap< ObjPtr, QwVecPtr > super;
+
+    CStlObjMap() : super()
+    {
+        SetClassId( clsid( CStlObjMap ) );
+    }
+};
+
+typedef CAutoPtr< clsid( CStlObjMap ), CStlObjMap > ObjMapPtr;
+
 class CStlEventMap:
     public CStlMap< EventPtr, gint32 > 
 {
@@ -455,8 +469,7 @@ class CStlEventMap:
 
     typedef CStlMap< EventPtr, gint32 > super;
 
-    CStlEventMap()
-        : CStlMap< EventPtr, gint32 >()
+    CStlEventMap() : super()
     {
         SetClassId( clsid( CStlEventMap ) );
     }

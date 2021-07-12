@@ -901,6 +901,8 @@ class CRpcRouterReqFwdrAuth :
         guint32 dwPortId,
         const std::string& strSrcUniqName,
         const std::string& strSrcDBusName );
+
+    gint32 StopProxyNoRef( guint32 dwPortId );
 };
 
 class CRpcRouterBridgeAuth :

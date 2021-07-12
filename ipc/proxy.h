@@ -595,7 +595,8 @@ struct CTimestampSvr
     {
         timespec tv;
         clock_gettime( CLOCK_MONOTONIC, &tv );
-        return tv.tv_sec - qwTimestampSec;
+        return ( ( guint64 )tv.tv_sec -
+            qwTimestampSec );
     }
 };
 
@@ -1594,6 +1595,11 @@ class CInterfaceServer :
     gint32 UserCancelRequest(
         IEventSink* pInvokeTask,
         guint64 qwIoTaskId );
+
+    // a user-initialized cancel request
+    gint32 ForceCancelRequests(
+        IEventSink* pInvokeTask,
+        ObjPtr& pvecTasks );
 
     // a user-initialized keep-alive request
     gint32 KeepAliveRequest(

@@ -146,6 +146,8 @@ static FactoryPtr InitClassFactory()
     INIT_MAP_ENTRYCFG( CIfDeferCallTaskEx2 );
     INIT_MAP_ENTRYCFG( CRedudantNodes );
 
+    INIT_MAP_ENTRYCFG( CIfParallelTaskGrpRfc );
+
     END_FACTORY_MAPS;
 };
 

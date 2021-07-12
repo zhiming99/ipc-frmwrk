@@ -97,6 +97,7 @@ $(OUTPUT_DIR)/$(TARGET_SVR) : $(OBJ_DIR)/$(OBJS_SVR) $(OBJS2)
 $(OUTPUT_DIR)/$(TARGET_CLI) : $(OBJ_DIR)/$(OBJS_CLI) $(OBJS2)
 	@if [ ! -d $(OUTPUT_DIR) ]; then mkdir -p $(OUTPUT_DIR);fi
 	$(CC) -o $@ $(OBJ_DIR)/$(OBJS_CLI) $(OBJS2) $(LINKER_OPTION)
+	@cp *.json $(OUTPUT_DIR)
 
 $(OBJ_DIR)/%.o : %.cpp
 	@echo Building file: $@

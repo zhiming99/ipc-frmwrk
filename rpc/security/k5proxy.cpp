@@ -24,7 +24,6 @@
  */
 
 #include "rpc.h"
-#include "sha1.h"
 #include "ifhelper.h"
 #include "security.h"
 #include "k5proxy.h"
@@ -1883,106 +1882,11 @@ gint32 gss_sess_hash_partial(
     return ret;
 }
 
-gint32 gen_sess_hash( BufPtr& pBuf,
-    std::string& strSess )
-{
-    BufPtr pTemp( true );
-    pTemp->Resize( 20 );
-    SHA1 sha;
-    sha.Input( pBuf->ptr(), pBuf->size());
-    if( !sha.Result( ( guint32* )pTemp->ptr() ) )
-        return ERROR_FAIL;
-
-    gint32 ret = BytesToString(
-        ( guint8* )pTemp->ptr(),
-        pTemp->size(), strSess );
-
-    if( SUCCEEDED( ret ) )
-    {
-        DebugPrint( 0, "Sess hash is %s",
-            strSess.c_str() );
-    }
-    return ret;
-}
-
-gint32 AppendConnParams(
-    IConfigDb* pConnParams,
-    BufPtr& pBuf )
-{
-    if( pConnParams == nullptr )
-        return -EINVAL;
-
-    gint32 ret = 0;
-    if( pBuf.IsEmpty() )
-    {
-        ret = pBuf.NewObj();
-        if( ERROR( ret ) )
-            return ret;
-    }
-
-    do{
-        CConnParams oConn( pConnParams );
-        std::string strDestIp =
-            oConn.GetDestIpAddr();
-
-        std::string strSrcIp =
-            oConn.GetSrcIpAddr();
-
-        guint32 dwDestPort =
-            oConn.GetDestPortNum();
-
-        guint32 dwSrcPort =
-            oConn.GetSrcPortNum();
-
-        ret = pBuf->Append( strDestIp.c_str(),
-            strDestIp.size() );
-        if( ERROR( ret ) )
-            break;
-
-        ret = pBuf->Append(
-            ( guint8* )&dwDestPort,
-            sizeof( dwDestPort ) );
-        if( ERROR( ret ) )
-            break;
-
-        ret = pBuf->Append( strSrcIp.c_str(),
-            strSrcIp.size() );
-        if( ERROR( ret ) )
-            break;
-
-        ret = pBuf->Append(
-            ( guint8* )&dwSrcPort,
-            sizeof( dwSrcPort ) );
-
-        if( ERROR( ret ) )
-            break;
-
-#ifdef DEBUG
-        if( true )
-        {
-            std::string strDump;
-            gint32 iRet = BytesToString(
-                ( guint8* )pBuf->ptr(),
-                pBuf->size(), strDump );
-
-            if( ERROR( iRet ) )
-                break;
-
-            DebugPrint( 0, "buf to hash: \n",
-               strDump.c_str() );
-        }
-#endif
-            
-    }while( 0 );
-        
-    return ret;
-}
-
 gint32 CK5AuthProxy::GenSessHash(
     gss_ctx_id_t gssctx,
     std::string& strSess )
 {
-    gint32          ret = 0;
+    gint32 ret = 0;
 
     do{
         BufPtr pBuf( true );
@@ -2012,7 +1916,16 @@ gint32 CK5AuthProxy::GenSessHash(
         pBuf->Append( ( char* )&qwSalt,
             sizeof( qwSalt ) );
 
-        ret = gen_sess_hash( pBuf, strSess );
+        stdstr strRet;
+        ret = gen_sess_hash( pBuf, strRet );
+        if( ERROR( ret ) )
+            break;
+
+        strSess = "AU";
+        strSess += strRet;
+
+        DebugPrint( 0, "Sess hash is %s",
+            strSess.c_str() );
 
     }while( 0 );
 

@@ -102,20 +102,12 @@ gint32 CIfStartRecvMsgTask::HandleIncomingMsg(
         if( ERROR( ret ) )
             break;
 
-        // put the InvokeMethod in a managed
-        // environment instead of letting it
-        // running untracked
-        ret = pIf->AddAndRun( pTask, true );
-        if( ERROR( ret ) )
-            break;
+        CIoManager* pMgr = pIf->GetIoMgr();
+        ret = DEFER_CALL( pMgr, ObjPtr( pIf ),
+            &CRpcServices::RunManagedTask,
+            pTask, false );
 
-        ret = pTask->GetError();
-        if( ret == STATUS_PENDING )
-        {
-            // CIfStartRecvMsgTask is done, the
-            // CIfInvokeMethodTask will take over
-            ret = 0;
-        }
+        break;
 
     }while( 0 );
 
@@ -241,28 +233,6 @@ gint32 CIfStartRecvMsgTask::OnIrpComplete(
             break;
         }
 
-        do{
-            // continue receiving the message
-            CParamList oParams;
-
-            // clone all the parameters in this
-            // task
-            oParams[ propIfPtr ] = pObj;
-            oParams.CopyProp( propMatchPtr, this );
-            oParams.CopyProp( propExtInfo, this );
-            ObjPtr pObj = oParams.GetCfg();
-
-            // offload the output tasks to the
-            // task threads
-            ret = DEFER_CALL( pMgr, ObjPtr( this ),
-                &CIfStartRecvMsgTask::StartNewRecv,
-                pObj );
-
-        }while( 0 );
-
-        if( ERROR( ret ) )
-            break;
-
         // whether error or not receiving, we
         // proceed to handle the incoming irp now
         ret = pIrp->GetStatus();
@@ -290,6 +260,30 @@ gint32 CIfStartRecvMsgTask::OnIrpComplete(
 
             HandleIncomingMsg( pObj, pCfg );
         }
+
+        do{
+            // continue receiving the message
+            CParamList oParams;
+
+            // clone all the parameters in this
+            // task
+            oParams[ propIfPtr ] = pObj;
+            oParams.CopyProp( propMatchPtr, this );
+            oParams.CopyProp( propExtInfo, this );
+            ObjPtr pObj = oParams.GetCfg();
+
+            // offload the output tasks to the
+            // task threads
+            ret = this->StartNewRecv( pObj );
+            //
+            // ret = DEFER_CALL( pMgr, ObjPtr( this ),
+            //     &CIfStartRecvMsgTask::StartNewRecv,
+            //     pObj );
+
+        }while( 0 );
+
+        if( ERROR( ret ) )
+            break;
 
     }while( 0 );
 
@@ -482,7 +476,8 @@ gint32 CIfRetryTask::DelayRun(
 
 gint32 CIfRetryTask::OnRetry()
 {
-    DebugPrint( 0, "Retrying task %s @0x%x",
+    DebugPrintEx( logInfo, 0,
+        "Retrying task %s @0x%x",
         CoGetClassName( GetClsid() ),
         ( intptr_t )this );
     return RunTask();
@@ -893,8 +888,10 @@ void CIfRetryTask::ClearClientNotify()
 gint32 CIfRetryTask::SetClientNotify(
     IEventSink* pCallback )
 {
-    if( pCallback == nullptr )
+    if( pCallback == nullptr ||
+        pCallback == this )
         return -EINVAL;
+
     ObjPtr pTask = pCallback;
     CCfgOpenerObj oParams( this );
     oParams.SetBoolProp( propNotifyClient, true );
@@ -933,9 +930,13 @@ gint32 CIfRetryTask::SetFwrdTask(
     return 0;
 }
 
-TaskletPtr CIfRetryTask::GetFwrdTask() const
+TaskletPtr CIfRetryTask::GetFwrdTask(
+    bool bClear )
 {
+    CStdRTMutex oTaskLock( GetLock() );
     TaskletPtr pTask = m_pFwdrTask;
+    if( bClear )
+        ClearFwrdTask();
     return pTask;
 }
 
@@ -945,21 +946,24 @@ gint32 CIfRetryTask::ClearFwrdTask()
     return 0;
 }
 
-TaskletPtr CIfRetryTask::GetEndFwrdTask()
+TaskletPtr CIfRetryTask::GetEndFwrdTask(
+    bool bClear )
 {
-    TaskletPtr pTask = GetFwrdTask();
+    TaskletPtr pTask = GetFwrdTask( bClear );
     if( pTask.IsEmpty() )
-        return pTask;
+        return TaskletPtr( this );
 
+    TaskletPtr pOldTask;
     do{
+        pOldTask = pTask;
         CIfRetryTask* pRetry = pTask;
         if( pRetry == nullptr )
             break;
 
-        pTask = pRetry->GetFwrdTask();
+        pTask = pRetry->GetFwrdTask( bClear );
         if( pTask.IsEmpty() )
         {
-            pTask = pRetry;
+            pTask = pOldTask;
             break;
         }
 
@@ -971,11 +975,8 @@ TaskletPtr CIfRetryTask::GetEndFwrdTask()
 gint32 CIfRetryTask::CancelTaskChain(
     guint32 dwContext, gint32 iError )
 {
-    TaskletPtr pTask = GetEndFwrdTask();
+    TaskletPtr pTask = GetFwrdTask();
     if( pTask.IsEmpty() )
-        return -EINVAL;
-
-    if( pTask->GetObjId() == GetObjId() )
         return -EINVAL;
 
     CCfgOpener oCfg(
@@ -986,6 +987,22 @@ gint32 CIfRetryTask::CancelTaskChain(
     if( ERROR( ret ) )
         return -EINVAL;
 
+    if( dwContext == eventUserCancel ||
+        dwContext == eventTimeoutCancel )
+        dwContext = eventTaskComp;
+
+    return DEFER_CALL(
+        pMgr, ObjPtr( pTask ),
+        &CIfRetryTask::DoCancelTaskChain,
+        ( EnumEventId )dwContext,
+        iError );
+}
+
+gint32 CIfRetryTask::DoCancelTaskChain(
+    guint32 dwContext, gint32 iError )
+{
+    TaskletPtr pTask = GetEndFwrdTask();
+
     EnumClsid iClsid = pTask->GetClsid();
     const char* pszClass =
         CoGetClassName( iClsid );
@@ -993,13 +1010,7 @@ gint32 CIfRetryTask::CancelTaskChain(
     DebugPrint( dwContext, "scheduled to "
         "cancel task %s...", pszClass );
 
-    if( dwContext == eventUserCancel ||
-        dwContext == eventTimeoutCancel )
-        dwContext = eventTaskComp;
-
-    return DEFER_CALL(
-        pMgr, ObjPtr( pTask ),
-        &IEventSink::OnEvent,
+    return pTask->OnEvent(
         ( EnumEventId )dwContext,
         iError, 0, nullptr );
 }
@@ -1430,7 +1441,7 @@ gint32 CIfTaskGroup::RunTaskInternal(
         return STATUS_PENDING;
 
     if( unlikely( IsCanceling() ) )
-        return ERROR_CANCEL_INSTEAD;
+        return STATUS_PENDING;
 
     if( !IsRunning() && iState == stateStarted )
         return STATUS_PENDING;
@@ -1454,7 +1465,6 @@ gint32 CIfTaskGroup::RunTaskInternal(
             m_queTasks.size() > 0 )
         {
             // cancel the rest tasks
-            SetCanceling( true );
             return ERROR_CANCEL_INSTEAD;
         }
 
@@ -1466,7 +1476,6 @@ gint32 CIfTaskGroup::RunTaskInternal(
             m_queTasks.size() > 0 )
         {
             // cancel the rest tasks
-            SetCanceling( true );
             return ERROR_CANCEL_INSTEAD;
         }
         
@@ -1508,14 +1517,6 @@ gint32 CIfTaskGroup::RunTaskInternal(
         oTaskLock.Lock();
         SetNoSched( false );
 
-        // received a cancel request
-        if( IsCanceling() &&
-            m_queTasks.size() > 0 )
-        {
-            ret = ERROR_CANCEL_INSTEAD;
-            break;
-        }
-
         if( unlikely( ret ==
             STATUS_MORE_PROCESS_NEEDED ) )
         {
@@ -1535,12 +1536,9 @@ gint32 CIfTaskGroup::RunTaskInternal(
             // code, probably the return code
             // changed before we have grabbed the
             // lock
-            ret = pTask->GetError();
+            ret = m_vecRetVals.back();
             if( ret == STATUS_PENDING )
-            {
                 ret = ERROR_STATE;
-                m_vecRetVals.push_back( ret );
-            }
         }
 
         if( ret == STATUS_PENDING )
@@ -1557,7 +1555,6 @@ gint32 CIfTaskGroup::RunTaskInternal(
             //
             // all the remaining tasks in this
             // task group will be canceled
-            SetCanceling( true );
             ret = ERROR_CANCEL_INSTEAD;
             break;
         }
@@ -1566,7 +1563,6 @@ gint32 CIfTaskGroup::RunTaskInternal(
             m_queTasks.size() > 0 )
         {
             
-            SetCanceling( true );
             ret = ERROR_CANCEL_INSTEAD;
             break;
         }
@@ -1673,26 +1669,29 @@ gint32 CIfTaskGroup::OnCancel(
     guint32 dwContext )
 {
     gint32 ret = -ECANCELED;
-    CStdRTMutex oTaskLock( GetLock() );
     do{
+        CStdRTMutex oTaskLock( GetLock() );
         EnumTaskState iState = GetTaskState();
         if( iState == stateStopped )
-        {
-            ret = STATUS_PENDING;
-            break;
-        }
+            return STATUS_PENDING;
 
         // notify the other guy canceling in
         // process
         if( !IsCanceling() )
             SetCanceling( true );
+        else
+        {
+            return STATUS_PENDING;
+        }
 
         if( IsNoSched() )
         {
             // some thread is working on this object
             // let's do it later
-            ret = STATUS_PENDING;
-            break;
+            SetCanceling( false );
+            oTaskLock.Unlock();
+            usleep( 100 );
+            continue;
         }
 
         if( iState == stateStarting )
@@ -1727,37 +1726,28 @@ gint32 CIfTaskGroup::OnCancel(
             oTaskLock.Unlock();
 
             ( *pTask )( eventCancelTask );
-            ret = pTask->GetError();
 
             oTaskLock.Lock();
             SetNoSched( false );
-            // ridiculous, we support asynchronous
-            // cancel?
-            if( unlikely( ret ==
-                STATUS_MORE_PROCESS_NEEDED ) )
-                ret = STATUS_PENDING;
-
-            if( ret == STATUS_PENDING )
-                break;
 
             pPrevTask = pTask;
         }
 
-    }while( 0 );
-
-    if( ret != STATUS_PENDING )
-    {
-        // for those Unlock'd condition, this call
-        // does not have effect
-        gint32 iRet = -ECANCELED;
-        for( gint32 i : m_vecRetVals )
+        if( ret != STATUS_PENDING )
         {
-            if( i == -ECANCELED )
-                break;
-            iRet = i;
+            gint32 iRet = -ECANCELED;
+            for( gint32 i : m_vecRetVals )
+            {
+                if( i == -ECANCELED )
+                    break;
+                iRet = i;
+            }
+            ret = iRet;
         }
-        ret = iRet;
-    }
+
+        break;
+
+    }while( 1 );
 
     return ret;
 }
@@ -2337,7 +2327,7 @@ gint32 CIfParallelTaskGrp::RunTaskInternal(
         return  STATUS_PENDING;
 
     if( IsCanceling() )
-        return ERROR_CANCEL_INSTEAD;
+        return STATUS_PENDING;
 
     if( !IsRunning() &&
         iState == stateStarted )
@@ -2376,9 +2366,6 @@ gint32 CIfParallelTaskGrp::RunTaskInternal(
 
         oTaskLock.Lock();
         SetNoSched( false );
-
-        if( IsCanceling() )
-            return ERROR_CANCEL_INSTEAD;
 
         // new tasks come in
         if( GetPendingCount() > 0 )
@@ -2591,400 +2578,85 @@ gint32 CIfParallelTaskGrp::OnCancel(
     CCfgOpener oCfg( ( IConfigDb* )GetConfig() );
     dwContext = eventCancelTask;
 
-    CStdRTMutex oTaskLock( GetLock() );
-    if( GetTaskState() == stateStopped )
-        return  ERROR_STATE;
-
-    if( !IsCanceling() )
-        SetCanceling( true );
-
-    if( IsNoSched() )
-    {
-        // some thread is working on this object
-        // let's do it later
-        return STATUS_PENDING;
-    }
-
-    SetNoSched( true );
-
     do{
-        std::vector< TaskletPtr > vecTasks;
+        CStdRTMutex oTaskLock( GetLock() );
+        if( GetTaskState() == stateStopped )
+            return  ERROR_STATE;
 
-        // when canceling, no re-schedule of this
-        // task on child task completion
-        if( m_quePendingTasks.size() > 0 )
+        if( !IsCanceling() )
+            SetCanceling( true );
+        else
         {
-            vecTasks.insert(
-                vecTasks.end(),
-                m_quePendingTasks.begin(),
-                m_quePendingTasks.end() );
-
-            m_quePendingTasks.clear();
+            return STATUS_PENDING;
         }
 
-        if( m_setTasks.size() > 0 )
+        if( IsNoSched() )
         {
-            vecTasks.insert(
-                vecTasks.end(),
-                m_setTasks.begin(),
-                m_setTasks.end() );
-
-            m_setTasks.clear();
+            // some thread is working on this
+            // object let's do it later
+            SetCanceling( false );
+            oTaskLock.Unlock();
+            usleep( 100 );
+            continue;
         }
-
-        oTaskLock.Unlock();
-
-        for( auto elem : vecTasks )
-        {
-            TaskletPtr& pTask = elem;
-            CIfParallelTask* pParaTask = pTask;
-
-            if( pParaTask != nullptr )
-            {
-                // for parallel task
-                ( *pTask )( eventTryLock | dwContext );
-            }
-            else
-            {
-                ( *pTask )( dwContext );
-            }
-        }
-
-        // call the super class to cleanup
-        // super::OnCancel( dwContext );
-        oTaskLock.Lock();
-
-    }while( 0 );
-    SetNoSched( false );
-
-    return ret;
-}
-
-CIfParallelTaskGrpRfc::CIfParallelTaskGrpRfc(
-    const IConfigDb* pCfg )
-    : super( pCfg )
-{
-    SetClassId( clsid( CIfParallelTaskGrpRfc ) );
-
-    CCfgOpener oCfg(
-        ( IConfigDb* )GetConfig() );
-    gint32 ret = 0;
-    do{
-        guint32 dwMaxRunning = 0;
-        guint32 dwMaxPending = 0;
-
-        ret = oCfg.GetIntProp(
-            propMaxReqs, dwMaxRunning );
-
-        if( SUCCEEDED( ret ) )
-        {
-            m_dwMaxRunning = dwMaxRunning;
-            oCfg.RemoveProperty( propMaxReqs );
-        }
-
-        ret = oCfg.GetIntProp(
-            propMaxPendings, dwMaxPending );
-
-        if( SUCCEEDED( ret ) )
-        {
-            m_dwMaxPending = dwMaxPending;
-            oCfg.RemoveProperty( propMaxPendings );
-        }
-
-    }while( 0 );
-
-    return;
-}
-
-gint32 CIfParallelTaskGrpRfc::OnChildComplete(
-    gint32 iRet, CTasklet* pChild )
-{
-
-    CStdRTMutex oTaskLock( GetLock() );
-    if( GetRunningCount() > GetMaxRunning() )
-    {
-        TaskletPtr taskPtr = pChild;
-        RemoveTask( taskPtr );
-        return 0;
-    }
-    return super::OnChildComplete( iRet, pChild );
-}
-
-gint32 CIfParallelTaskGrpRfc::RunTaskInternal(
-    guint32 dwContext )
-{
-    gint32 ret = 0;
-
-    CStdRTMutex oTaskLock( GetLock() );
-
-    EnumTaskState iState = GetTaskState();
-    if( iState == stateStopped )
-        return  STATUS_PENDING;
-
-    if( IsCanceling() )
-        return ERROR_CANCEL_INSTEAD;
-
-    if( !IsRunning() &&
-        iState == stateStarted )
-        return STATUS_PENDING;
-
-    CCfgOpener oCfg( ( IConfigDb* )GetConfig() );
-    if( IsNoSched() )
-        return STATUS_PENDING;
-
-    if( iState == stateStarting )
-    {
-        SetTaskState( stateStarted );
-        SetRunning( true );
-    }
-
-    do{
-        std::deque< TaskletPtr > queTasksToRun;
-
-        if( GetTaskCount() == 0 )
-            break;
-
-        gint32 iCount =
-            GetMaxRunning() - m_setTasks.size();
-
-        if( iCount <= 0 )
-        {
-            ret = STATUS_PENDING;
-            break;
-        }
-
-        if( m_quePendingTasks.empty() )
-        {
-            ret = STATUS_PENDING;
-            break;
-        }
-
-        iCount = std::min( ( size_t )iCount,
-            m_quePendingTasks.size() );
-
-        queTasksToRun.insert(
-            queTasksToRun.begin(),
-            m_quePendingTasks.begin(),
-            m_quePendingTasks.begin() + iCount );
-
-        m_quePendingTasks.erase(
-            m_quePendingTasks.begin(),
-            m_quePendingTasks.begin() + iCount );
-
-        m_setTasks.insert(
-            queTasksToRun.begin(),
-            queTasksToRun.end() );
 
         SetNoSched( true );
 
-        oTaskLock.Unlock();
+        do{
+            std::vector< TaskletPtr > vecTasks;
 
-        for( auto pTask : queTasksToRun )
-        {
-            if( !pTask.IsEmpty() )
-                ( *pTask )( eventZero );
-        }
+            // when canceling, no re-schedule of
+            // this task on child task completion
+            if( m_quePendingTasks.size() > 0 )
+            {
+                vecTasks.insert(
+                    vecTasks.end(),
+                    m_quePendingTasks.begin(),
+                    m_quePendingTasks.end() );
 
-        oTaskLock.Lock();
+                m_quePendingTasks.clear();
+            }
+
+            if( m_setTasks.size() > 0 )
+            {
+                vecTasks.insert(
+                    vecTasks.end(),
+                    m_setTasks.begin(),
+                    m_setTasks.end() );
+
+                m_setTasks.clear();
+            }
+
+            oTaskLock.Unlock();
+
+            for( auto elem : vecTasks )
+            {
+                TaskletPtr& pTask = elem;
+                CIfParallelTask* pParaTask = pTask;
+
+                if( pParaTask != nullptr )
+                {
+                    // for parallel task
+                    ( *pTask )( eventTryLock | dwContext );
+                }
+                else
+                {
+                    ( *pTask )( dwContext );
+                }
+            }
+
+            // call the super class to cleanup
+            // super::OnCancel( dwContext );
+            oTaskLock.Lock();
+
+        }while( 0 );
+
         SetNoSched( false );
-
-        if( IsCanceling() )
-            return ERROR_CANCEL_INSTEAD;
-
-        if( GetPendingCount() > 0 &&
-            GetMaxRunning() > GetRunningCount() )
-            continue;
-
-        // pending means there are tasks running, does
-        // not indicate a specific task's return value
-        if( GetTaskCount() > 0 )
-            ret = STATUS_PENDING;
-
         break;
 
     }while( 1 );
 
-    if( ret != STATUS_PENDING )
-        SetRunning( false );
-
     return ret;
-}
-
-gint32 CIfParallelTaskGrpRfc::AddAndRun(
-    TaskletPtr& pTask )
-{
-    if( pTask.IsEmpty() )
-        return -EINVAL;
-
-    gint32 ret = 0;
-
-    do{
-        CStdRTMutex oTaskLock( GetLock() );
-        EnumTaskState iState = GetTaskState();
-        if( iState == stateStopped )
-        {
-            ret = ERROR_STATE;
-            break;
-        }
-        CCfgOpener oCfg(
-            ( IConfigDb* )GetConfig() );
-
-        ObjPtr pIf;
-        ret = oCfg.GetObjPtr( propIfPtr, pIf );
-        if( ERROR( ret ) )
-            break;
-
-        CRpcServices* pService = pIf;
-        if( pService == nullptr )
-        {
-            ret = -EFAULT;
-            break;
-        }
-
-        CIoManager* pMgr = pService->GetIoMgr();
-
-        bool bRunning = IsRunning();
-        if( !bRunning && iState == stateStarted )
-        {
-            ret = ERROR_STATE;
-            break;
-        }
-
-        if( GetPendingCount() >=
-            GetMaxPending() )
-        {
-            ret = ERROR_QUEUE_FULL;
-            DebugPrint( ret,
-                "RFC: queue is full,"
-                " AddAndRun failed" );
-            break;
-        }
-
-        CCfgOpener oChildCfg(
-            ( IConfigDb* )pTask->GetConfig() );
-
-        oChildCfg.SetPointer(
-            propParentTask, this );
-
-        m_quePendingTasks.push_back( pTask );
-        oTaskLock.Unlock();
-
-        if( bRunning )
-        {
-            // re-run this task group immediately
-            ret = ( *this )( eventZero );
-
-            if( ret == -EDEADLK )
-            {
-                TaskletPtr pThisGrp( this );
-                pTask->MarkPending();
-                pMgr->RescheduleTask( pThisGrp );
-                ret = STATUS_PENDING;
-            }
-            break;
-        }
-        else
-        {
-            pTask->MarkPending();
-        }
-
-    }while( 0 );
-
-    return ret;
-}
-
-gint32 CIfParallelTaskGrpRfc::AppendTask(
-    TaskletPtr& pTask )
-{
-    gint32 ret = 0;
-    do{
-        CStdRTMutex oTaskLock( GetLock() );
-        if( GetPendingCount() >= GetMaxPending() )
-        {
-            DebugPrint( ret,
-                "RFC: queue is full,"
-                " append task failed" );
-            ret = ERROR_QUEUE_FULL;
-            break;
-        }
-        super::AppendTask( pTask );
-
-    }while( 0 );
-
-    return ret;
-}
-
-gint32 CIfParallelTaskGrpRfc::InsertTask(
-    TaskletPtr& pTask )
-{
-    gint32 ret = 0;
-    do{
-        CStdRTMutex oTaskLock( GetLock() );
-        m_quePendingTasks.push_front( pTask );
-        if( GetRunningCount() >= GetMaxRunning() )
-            break;
-
-        CCfgOpener oCfg(
-            ( IConfigDb* )GetConfig() );
-
-        CIoManager* pMgr = nullptr;
-        ret = GET_IOMGR( oCfg, pMgr );
-        if( ERROR( ret ) )
-            break;
-
-        oTaskLock.Unlock();
-
-        TaskletPtr pThisTask( this );
-        ret = pMgr->RescheduleTask( pThisTask );
-
-    }while( 0 );
-
-    return ret;
-}
-
-gint32 CIfParallelTaskGrpRfc::SetLimit(
-    guint32 dwMaxRunning, guint32 dwMaxPending )
-{
-    CStdRTMutex oTaskLock( GetLock() );
-    if( dwMaxPending == 0 || dwMaxRunning == 0 )
-        return -EINVAL;
-
-    m_dwMaxPending = std::min(
-        dwMaxPending, RFC_MAX_PENDINGS );
-
-    m_dwMaxRunning = std::min(
-        dwMaxRunning, RFC_MAX_REQS );
-
-    EnumTaskState iState = GetTaskState();
-
-    if( IsCanceling() )
-        return 0;
-
-    if( !IsRunning() &&
-        iState == stateStarted )
-        return 0;
-
-    if( IsNoSched() )
-        return 0;
-
-    CCfgOpener oCfg( ( IConfigDb* )GetConfig() );
-
-    if( GetRunningCount() < m_dwMaxRunning &&
-        GetPendingCount() > 0 )
-    {
-        CCfgOpener oCfg(
-            ( IConfigDb* )GetConfig() );
-
-        CIoManager* pMgr = nullptr;
-        gint32 ret = GET_IOMGR( oCfg, pMgr );
-        if( ERROR( ret ) )
-            return ret;
-
-        TaskletPtr pThisTask( this );
-        ret = pMgr->RescheduleTask( pThisTask );
-    }
-
-    return STATUS_SUCCESS;
 }
 
 gint32 CIfCleanupTask::OnIrpComplete(
@@ -5228,7 +4900,9 @@ gint32 CIfInvokeMethodTask::GetAgeSec(
         if( ERROR( ret ) )
             break;
         
-        dwAge = CTimestampSvr::GetAgeSec( qwTs );
+        guint64 qwVal =
+            CTimestampSvr::GetAgeSec( qwTs );
+        dwAge = abs( ( gint64 )qwVal );
 
     }while( 0 );
     return ret;

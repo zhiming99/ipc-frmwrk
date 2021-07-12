@@ -114,6 +114,7 @@
 #define ERROR_PAUSED            ( ( gint32 )0x8001000d )
 #define ERROR_CANCEL_INSTEAD    ( ( gint32 )0x8001000f )
 #define ERROR_NOT_IMPL          ( ( gint32 )0x80010010 )
+#define ERROR_DUPLICATED        ( ( gint32 )0x80010011 )
 
 // for flow control
 #define ERROR_QUEUE_FULL        ( ( gint32 )0x8001000e )
@@ -201,6 +202,7 @@ do{\
     DebugMsg( ret, strFmt, ##__VA_ARGS__ ).c_str() );} )
 
 #define MAX_PENDING_MSG             20
+#define MAX_DBUS_REQS               ( MAX_PENDING_MSG * 1000 )
 
 // for Sem_Timedwait interval
 #define THREAD_WAKEUP_INTERVAL      10

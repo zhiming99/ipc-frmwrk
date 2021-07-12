@@ -57,6 +57,7 @@ class CDBusProxyPdo : public CRpcPdoPort
     bool                m_bStopReady = false;
     TaskletPtr          m_pConnTask;
     std::atomic< bool > m_atmInitDone;
+    std::atomic< guint32 > m_atmReqSent;
 
     gint32 CheckConnCmdResp(
         DBusMessage* pMsg, gint32& iMethodReturn );
@@ -70,7 +71,9 @@ class CDBusProxyPdo : public CRpcPdoPort
     gint32 BuildMsgHeader( DMsgPtr& pMsg ) const;
 
     virtual gint32 PackupReqMsg(
-        DMsgPtr& pReqMsg, DMsgPtr& pOutMsg ) const;
+        DMsgPtr& pReqMsg,
+        DMsgPtr& pOutMsg,
+        bool bNoReply = false ) const;
 
     gint32 UnpackFwrdRespMsg( IRP* pIrp );
     gint32 UnpackFwrdEventMsg( IRP* pIrp );
@@ -267,7 +270,9 @@ class CDBusProxyPdoLpbk : public CDBusProxyPdo
     gint32 GetSender( std::string& strSender ) const;
 
     virtual gint32 PackupReqMsg(
-        DMsgPtr& pReqMsg, DMsgPtr& pOutMsg ) const;
+        DMsgPtr& pReqMsg,
+        DMsgPtr& pOutMsg,
+        bool bNoReply = false ) const;
 
     gint32 GetProperty(
         gint32 iProp, CBuffer& oBuf ) const;

@@ -683,8 +683,19 @@ gint32 CRpcTcpBusPort::CreateMLoopPool()
 {
     gint32 ret = 0; 
     do{
-        guint32 dwCount =
-            GetIoMgr()->GetNumCores();
+        CIoManager* pMgr = GetIoMgr();
+        guint32 dwCount = 1;
+
+        guint32 dwRole = 2;
+        ret = pMgr->GetCmdLineOpt(
+            propRouterRole, dwRole );
+
+        if( ERROR( ret ) )
+            ret = 0;
+
+        if( dwRole & 0x2 )
+            dwCount = pMgr->GetNumCores();
+
         for( int i = 0; i < dwCount; ++i )
         {
             CParamList oCfg;
@@ -815,20 +826,6 @@ gint32 CRpcTcpBusPort::PreStart( IRP* pIrp )
         m_bRfc = bRfc;
         if( !m_bRfc )
             break;
-
-        guint32 dwRole = 2;
-        ret = pMgr->GetCmdLineOpt(
-            propRouterRole, dwRole );
-
-        if( ERROR( ret ) )
-            ret = 0;
-
-        if( ( dwRole & 2 ) == 0 )
-        {
-            // not a bridge
-            m_bRfc = false;
-            break;
-        }
 
         ret = CreateMLoopPool();
         if( ERROR( ret ) )
